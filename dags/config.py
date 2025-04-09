@@ -30,5 +30,3 @@ SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"
 # 本地开发环境脚本路径（如果需要区分环境）
 # LOCAL_SCRIPTS_BASE_PATH = "/path/to/local/scripts"
 
-# 资源表加载并行度
-RESOURCE_LOADING_PARALLEL_DEGREE = 4  # 可根据环境调整
