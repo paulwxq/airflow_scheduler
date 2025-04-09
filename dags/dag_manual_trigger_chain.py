@@ -407,7 +407,7 @@ def process_models(**context):
 
 # 创建DAG
 with DAG(
-    'dag_manual_trigger_chain_two_level',
+    'dag_manual_trigger_chain',
     default_args=default_args,
     description='手动触发指定表的依赖链执行（两级任务）',
     schedule_interval=None,  # 设置为None表示只能手动触发
