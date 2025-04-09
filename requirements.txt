@@ -2,3 +2,4 @@ apache-airflow==2.10.5
 psycopg2-binary>=2.9.9
 neo4j>=5.19.0
 pendulum>=3.0.0
+networkx>=3.4.2
