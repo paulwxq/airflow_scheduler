@@ -260,35 +260,106 @@ def is_data_model_table(table_name):
     finally:
         driver.close()
 
-# 动态导入并执行模型脚本的 run() 方法（基于 script_name + execution_mode）
+# 检查脚本文件是否存在于指定路径
+def check_script_exists(script_name):
+    """
+    检查脚本文件是否存在于配置的脚本目录中
+    
+    参数:
+        script_name (str): 脚本文件名
+        
+    返回:
+        bool: 如果脚本存在返回True，否则返回False
+        str: 完整的脚本路径
+    """
+    from pathlib import Path
+    import os
+    import logging
+    
+    logger = logging.getLogger("airflow.task")
+    
+    if not script_name:
+        logger.error("脚本名称为空，无法检查")
+        return False, None
+    
+    script_path = Path(SCRIPTS_BASE_PATH) / script_name
+    script_path_str = str(script_path)
+    
+    logger.info(f"检查脚本路径: {script_path_str}")
+    
+    if os.path.exists(script_path_str):
+        logger.info(f"脚本文件已找到: {script_path_str}")
+        return True, script_path_str
+    else:
+        logger.error(f"脚本文件不存在: {script_path_str}")
+        
+        # 尝试列出目录中的文件
+        try:
+            base_dir = Path(SCRIPTS_BASE_PATH)
+            if base_dir.exists():
+                files = list(base_dir.glob("*.py"))
+                logger.info(f"目录 {SCRIPTS_BASE_PATH} 中的Python文件: {[f.name for f in files]}")
+            else:
+                logger.error(f"基础目录不存在: {SCRIPTS_BASE_PATH}")
+        except Exception as e:
+            logger.error(f"列出目录内容时出错: {str(e)}")
+            
+        return False, script_path_str
+
+# 更新run_model_script函数以使用上述检查
 def run_model_script(table_name, execution_mode):
+    """
+    根据表名查找并执行对应的模型脚本
+    
+    参数:
+        table_name (str): 要处理的表名
+        execution_mode (str): 执行模式 (append/full_refresh)
+    
+    返回:
+        bool: 执行成功返回True，否则返回False
+    """
+    import logging
+    logger = logging.getLogger("airflow.task")
+    
+    # 从Neo4j获取脚本名称
     script_name = get_script_name_from_neo4j(table_name)
     if not script_name:
-        print(f"[WARN] 未找到表 {table_name} 的 script_name，跳过")
-        return
-
-    # scripts_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataops", "scripts")
-    # script_path = os.path.join(scripts_base_path, script_name)
-    from pathlib import Path
-    script_path = Path(SCRIPTS_BASE_PATH) / script_name
-
-    if not os.path.exists(script_path):
-        print(f"[ERROR] 脚本文件不存在: {script_path}")
-        return
-
-    print(f"[INFO] 执行模型脚本: {script_path}")
+        logger.error(f"未找到表 {table_name} 的脚本名称，跳过处理")
+        return False
+    
+    logger.info(f"从Neo4j获取到表 {table_name} 的脚本名称: {script_name}")
+    
+    # 检查脚本文件是否存在
+    exists, script_path = check_script_exists(script_name)
+    if not exists:
+        logger.error(f"表 {table_name} 的脚本文件 {script_name} 不存在，跳过处理")
+        return False
+    
+    # 执行脚本
+    logger.info(f"开始执行脚本: {script_path}")
     try:
-        spec = importlib.util.spec_from_file_location("model_script", script_path)
+        # 动态导入模块
+        import importlib.util
+        import sys
+        
+        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-
+        
+        # 检查并调用标准入口函数run
         if hasattr(module, "run"):
+            logger.info(f"调用脚本 {script_name} 的标准入口函数 run()")
             module.run(table_name=table_name, execution_mode=execution_mode)
+            logger.info(f"脚本 {script_name} 执行成功")
+            return True
         else:
-            print(f"[WARN] 模型脚本 {script_name} 中未定义 run(...) 方法，跳过")
+            logger.error(f"脚本 {script_name} 中未定义标准入口函数 run()，无法执行")
+            return False
     except Exception as e:
-        print(f"[ERROR] 执行模型脚本 {script_name} 时出错: {str(e)}")
-
+        logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 # 从 Neo4j 获取指定 DataModel 表之间的依赖关系图
 # 返回值为 dict：{目标表: [上游依赖表1, 上游依赖表2, ...]}
