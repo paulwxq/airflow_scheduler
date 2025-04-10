@@ -3,7 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from datetime import datetime
-from utils import get_enabled_tables, is_data_model_table, run_model_script, get_model_dependency_graph
+from utils import get_enabled_tables, is_data_model_table, run_model_script, get_model_dependency_graph, check_table_relationship
 from config import NEO4J_CONFIG
 import pendulum
 import logging
@@ -96,6 +96,12 @@ with DAG("dag_data_model_monthly", start_date=datetime(2024, 1, 1), schedule_int
                 # 获取表名列表
                 table_names = [t['table_name'] for t in model_tables]
                 
+                # 特别检查两个表之间的关系
+                if 'book_sale_amt_yearly' in table_names and 'book_sale_amt_monthly' in table_names:
+                    logger.info("特别检查 book_sale_amt_yearly 和 book_sale_amt_monthly 之间的关系")
+                    relationship = check_table_relationship('book_sale_amt_yearly', 'book_sale_amt_monthly')
+                    logger.info(f"关系检查结果: {relationship}")
+                
                 # 使用优化函数生成执行顺序，可以处理循环依赖
                 optimized_table_order = generate_optimized_execution_order(table_names)
                 logger.info(f"生成优化执行顺序, 共 {len(optimized_table_order)} 个表")
@@ -132,22 +138,34 @@ with DAG("dag_data_model_monthly", start_date=datetime(2024, 1, 1), schedule_int
 
                 # 建立任务依赖（基于 DERIVED_FROM 图）
                 dependency_count = 0
+                logger.info("开始建立任务依赖关系...")
                 for target, upstream_list in dependency_graph.items():
+                    logger.info(f"处理目标表 {target} 的依赖关系")
                     for upstream in upstream_list:
                         if upstream in task_dict and target in task_dict:
+                            logger.info(f"建立依赖边: {upstream} >> {target}")
                             task_dict[upstream] >> task_dict[target]
                             dependency_count += 1
                             logger.debug(f"建立依赖关系: {upstream} >> {target}")
                         else:
-                            logger.warning(f"无法建立依赖关系，缺少任务: {upstream} 或 {target}")
+                            missing = []
+                            if upstream not in task_dict:
+                                missing.append(f"上游表 {upstream}")
+                            if target not in task_dict:
+                                missing.append(f"目标表 {target}")
+                            missing_str = " 和 ".join(missing)
+                            logger.warning(f"无法建立依赖关系: {upstream} >> {target}，缺少任务: {missing_str}")
 
                 logger.info(f"总共建立了 {dependency_count} 个任务依赖关系")
+                logger.info(f"任务字典中的所有表: {list(task_dict.keys())}")
 
                 # 最顶层的 task（没有任何上游）需要依赖周模型任务完成
                 all_upstreams = set()
                 for upstreams in dependency_graph.values():
                     all_upstreams.update(upstreams)
                 top_level_tasks = [t for t in table_names if t not in all_upstreams]
+                logger.info(f"所有上游表集合: {all_upstreams}")
+                logger.info(f"识别出的顶层表: {top_level_tasks}")
                 
                 if top_level_tasks:
                     logger.info(f"发现 {len(top_level_tasks)} 个顶层任务: {', '.join(top_level_tasks)}")
