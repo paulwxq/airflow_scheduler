@@ -1,4 +1,28 @@
 # dag_manual_dependency_trigger.py
+"""
+手动触发数据表依赖链执行DAG
+
+功能：
+- 根据指定的表名，构建并执行其上游依赖链
+- 支持三种依赖级别：
+  - 'self'：只执行当前表，不处理上游依赖
+  - 'resource'：查找依赖到Resource层，但只执行DataModel层
+  - 'source'：查找并执行完整依赖链到Source层
+
+参数：
+- TABLE_NAME：目标表名
+- DEPENDENCY_LEVEL/UPPER_LEVEL_STOP：依赖级别
+
+使用示例：
+```
+{
+  "conf": {
+    "TABLE_NAME": "book_sale_amt_2yearly",
+    "DEPENDENCY_LEVEL": "resource"
+  }
+}
+```
+"""
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
@@ -65,17 +89,27 @@ def get_dag_params(**context):
     """获取DAG运行参数"""
     params = context.get('params', {})
     table_name = params.get('TABLE_NAME')
-    dependency_level = params.get('DEPENDENCY_LEVEL', 'resource')  # 默认值为resource
+    
+    # 记录原始参数信息
+    logger.info(f"接收到的原始参数: {params}")
+    
+    # 同时检查DEPENDENCY_LEVEL和UPPER_LEVEL_STOP参数，兼容两种参数名
+    dependency_level = params.get('DEPENDENCY_LEVEL')
+    logger.info(f"从DEPENDENCY_LEVEL获取的值: {dependency_level}")
+    
+    if dependency_level is None:
+        dependency_level = params.get('UPPER_LEVEL_STOP', 'resource')  # 兼容旧参数名
+        logger.info(f"从UPPER_LEVEL_STOP获取的值: {dependency_level}")
     
     if not table_name:
         raise ValueError("必须提供TABLE_NAME参数")
     
     # 验证dependency_level参数
     if dependency_level not in ['self', 'resource', 'source']:
-        logger.warning(f"无效的DEPENDENCY_LEVEL参数: {dependency_level}，使用默认值'resource'")
+        logger.warning(f"无效的依赖级别参数: {dependency_level}，使用默认值'resource'")
         dependency_level = 'resource'
     
-    logger.info(f"开始处理表: {table_name}, 依赖级别: {dependency_level}")
+    logger.info(f"最终使用的参数 - 表名: {table_name}, 依赖级别: {dependency_level}")
     return table_name, dependency_level
 
 def is_data_model_table(table_name):
@@ -232,6 +266,9 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
     返回:
         list: 依赖链列表，按执行顺序排序（从上游到下游）
     """
+    # 记录依赖级别
+    logger.info(f"构建依赖链 - 起始表: {start_table}, 依赖级别: {dependency_level}")
+    
     # 创建有向图
     G = nx.DiGraph()
     
@@ -248,6 +285,7 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
     
     # 如果只执行自己，直接返回
     if dependency_level == 'self':
+        logger.info(f"依赖级别为'self'，只包含起始表: {start_table}")
         script_name = get_script_name_for_model(start_table) if table_type == 'DataModel' else get_script_name_for_resource(start_table)
         execution_mode = get_execution_mode(start_table)
         return [{
@@ -257,15 +295,21 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
             'execution_mode': execution_mode
         }]
     
+    # 判断resource级别还是source级别
+    need_source = (dependency_level == 'source')
+    logger.info(f"是否需要查找到Source层: {need_source}")
+    
     # BFS构建依赖图
     visited = set([start_table])
     queue = [start_table]
     
     while queue:
         current = queue.pop(0)
+        current_type = G.nodes[current].get('type')
+        logger.info(f"处理节点: {current}, 类型: {current_type}")
         
         # 处理当前节点的上游依赖
-        if G.nodes[current].get('type') == 'DataModel':
+        if current_type == 'DataModel':
             # 获取DataModel的上游依赖
             upstream_models = get_upstream_models(current)
             for upstream in upstream_models:
@@ -275,25 +319,43 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
                     queue.append(upstream)
                 G.add_edge(current, upstream, type='model_to_model')
             
-            # 获取上游DataResource
+            # 获取上游DataResource - 对于resource和source级别都需要查找DataResource
             upstream_resources = get_upstream_resources(current)
             for upstream in upstream_resources:
                 if upstream not in visited:
                     G.add_node(upstream, type='DataResource')
                     visited.add(upstream)
-                    # 如果依赖级别为source并且上游是DataResource，则继续向上查找DataSource
-                    if dependency_level == 'source':
+                    # 只有在source级别时才继续向上查找DataSource
+                    if need_source:
                         queue.append(upstream)
                 G.add_edge(current, upstream, type='model_to_resource')
         
-        # 如果当前节点是DataResource且依赖级别为source，则查找上游DataSource
-        elif G.nodes[current].get('type') == 'DataResource' and dependency_level == 'source':
+        # 如果当前节点是DataResource，只有在source级别才查找上游DataSource
+        elif current_type == 'DataResource' and need_source:
             data_sources = get_data_sources(current)
             for source in data_sources:
                 if source not in visited:
                     G.add_node(source, type='DataSource')
                     visited.add(source)
                 G.add_edge(current, source, type='resource_to_source')
+    
+    # 记录依赖图节点和边信息
+    logger.info(f"依赖图节点数: {len(G.nodes)}, 边数: {len(G.edges)}")
+    
+    # 在resource级别，确保不处理DataSource节点的脚本
+    if dependency_level == 'resource':
+        # 查找所有DataSource节点
+        source_nodes = [node for node, attrs in G.nodes(data=True) if attrs.get('type') == 'DataSource']
+        logger.info(f"依赖级别为'resource'，将移除 {len(source_nodes)} 个DataSource节点")
+        
+        # 移除所有DataSource节点
+        for node in source_nodes:
+            G.remove_node(node)
+        
+        # 重新记录依赖图信息
+        logger.info(f"清理后依赖图节点数: {len(G.nodes)}, 边数: {len(G.edges)}")
+    
+    logger.info(f"依赖图节点: {list(G.nodes)}")
     
     # 检测循环依赖
     cycles = list(nx.simple_cycles(G))
@@ -310,6 +372,7 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
         # 我们需要的是执行顺序，所以要反转图然后进行拓扑排序
         reverse_G = G.reverse()
         execution_order = list(nx.topological_sort(reverse_G))
+        logger.info(f"计算出的执行顺序: {execution_order}")
         
         # 构建最终依赖链
         dependency_chain = []
@@ -318,6 +381,7 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
             
             # 跳过DataSource节点，它们没有脚本需要执行
             if node_type == 'DataSource':
+                logger.info(f"跳过DataSource节点: {table_name}")
                 continue
             
             # 获取脚本和执行模式
@@ -334,7 +398,9 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
                 'table_type': node_type,
                 'execution_mode': execution_mode
             })
+            logger.info(f"添加到依赖链: {table_name}, 类型: {node_type}")
         
+        logger.info(f"最终依赖链长度: {len(dependency_chain)}")
         return dependency_chain
     
     except Exception as e:
@@ -402,9 +468,23 @@ def execute_scripts(scripts_list):
     return success
 
 def prepare_dependency_chain(**context):
-    """准备依赖链并保存到XCom"""
+    """
+    准备依赖链并保存到XCom
+    
+    不同依赖级别的行为：
+    - self: 只执行当前表，不查找上游依赖
+    - resource: 仅查找数据模型依赖到Resource层，但不执行Resource层的脚本
+    - source: 完整查找所有依赖到Source层，并执行所有相关脚本
+    """
     # 获取参数
     table_name, dependency_level = get_dag_params(**context)
+    
+    # 记录依赖级别信息
+    logger.info(f"依赖级别说明:")
+    logger.info(f"- self: 只执行当前表，不查找上游依赖")
+    logger.info(f"- resource: 仅查找数据模型依赖到Resource层，但不执行Resource层的脚本")
+    logger.info(f"- source: 完整查找所有依赖到Source层，并执行所有相关脚本")
+    logger.info(f"当前依赖级别: {dependency_level}")
     
     # 获取依赖链
     dependency_chain = build_dependency_chain_nx(table_name, dependency_level)
@@ -420,38 +500,131 @@ def prepare_dependency_chain(**context):
     ti = context['ti']
     ti.xcom_push(key='dependency_chain', value=dependency_chain)
     
-    # 检查是否有各类型的脚本需要执行
-    has_resource = any(item['table_type'] == 'DataResource' for item in dependency_chain)
-    has_model = any(item['table_type'] == 'DataModel' for item in dependency_chain)
+    # 保存依赖级别，便于后续任务使用
+    ti.xcom_push(key='dependency_level', value=dependency_level)
     
-    logger.info(f"是否有DataResource脚本: {has_resource}, 是否有DataModel脚本: {has_model}")
+    # 检查是否有各类型的脚本需要执行
+    resource_tables = [item for item in dependency_chain if item['table_type'] == 'DataResource']
+    model_tables = [item for item in dependency_chain if item['table_type'] == 'DataModel']
+    
+    has_resource = len(resource_tables) > 0
+    has_model = len(model_tables) > 0
+    
+    # 处理特殊情况：如果是self级别，且起始表是DataResource
+    if dependency_level == 'self' and not has_model and has_resource:
+        # 确保只有一个DataResource表，而且是起始表
+        is_start_resource = any(item['table_name'] == table_name for item in resource_tables)
+        logger.info(f"依赖级别为'self'，起始表是DataResource: {is_start_resource}")
+        
+        # 额外保存标志，标记这是特殊情况
+        ti.xcom_push(key='is_start_resource_only', value=is_start_resource)
+    
+    logger.info(f"是否有DataResource脚本: {has_resource}({len(resource_tables)}个), 是否有DataModel脚本: {has_model}({len(model_tables)}个)")
     
     return True
 
 def process_resources(**context):
-    """处理所有DataResource层的脚本"""
+    """
+    处理所有DataResource层的脚本
+    
+    依赖级别处理策略：
+    - self: 只有当起始表是DataResource类型时才执行
+    - resource: 不执行任何DataResource脚本
+    - source: 执行所有依赖链中的DataResource脚本
+    """
     # 获取任务间共享变量
     ti = context['ti']
     dependency_chain = ti.xcom_pull(task_ids='prepare_dependency_chain', key='dependency_chain')
     
-    # 过滤出DataResource类型的表
-    resource_scripts = [item for item in dependency_chain if item['table_type'] == 'DataResource']
+    # 直接从XCom获取依赖级别，避免重复解析
+    dependency_level = ti.xcom_pull(task_ids='prepare_dependency_chain', key='dependency_level')
     
-    logger.info(f"要执行的DataResource脚本: {[item['table_name'] for item in resource_scripts]}")
+    # 记录当前任务的依赖级别
+    logger.info(f"process_resources任务 - 当前依赖级别: {dependency_level}")
+    
+    # 检查特殊标志
+    is_start_resource_only = ti.xcom_pull(task_ids='prepare_dependency_chain', key='is_start_resource_only', default=False)
+    
+    # 依赖级别处理逻辑
+    if dependency_level == 'self' and not is_start_resource_only:
+        logger.info("依赖级别为'self'且起始表不是DataResource，跳过process_resources任务")
+        return True
+    elif dependency_level == 'resource':
+        logger.info("依赖级别为'resource'，根据设计不执行DataResource表脚本")
+        return True
+    
+    # 获取表名（仅在self级别需要）
+    table_name = None
+    if dependency_level == 'self':
+        params = context.get('params', {})
+        table_name = params.get('TABLE_NAME') or params.get('table_name')
+        logger.info(f"依赖级别为'self'，目标表: {table_name}")
+    
+    # 根据依赖级别过滤要执行的脚本
+    if dependency_level == 'self' and is_start_resource_only:
+        # 特殊情况：只处理与起始表名匹配的Resource表
+        resource_scripts = [item for item in dependency_chain if item['table_type'] == 'DataResource' and item['table_name'] == table_name]
+        logger.info(f"依赖级别为'self'且起始表是DataResource，只处理表: {table_name}")
+    elif dependency_level == 'source':
+        # source级别：处理所有Resource表
+        resource_scripts = [item for item in dependency_chain if item['table_type'] == 'DataResource']
+        logger.info(f"依赖级别为'source'，处理所有DataResource表")
+    else:
+        # 其他情况，返回空列表
+        resource_scripts = []
+    
+    if not resource_scripts:
+        logger.info("没有找到DataResource类型的表需要处理")
+        return True
+    
+    # 详细记录要执行的脚本信息
+    logger.info(f"要执行的DataResource脚本数量: {len(resource_scripts)}")
+    for idx, item in enumerate(resource_scripts, 1):
+        logger.info(f"Resource脚本[{idx}]: 表={item['table_name']}, 脚本={item['script_name']}, 模式={item['execution_mode']}")
     
     # 执行所有DataResource脚本
     return execute_scripts(resource_scripts)
 
 def process_models(**context):
-    """处理所有DataModel层的脚本"""
+    """
+    处理所有DataModel层的脚本
+    
+    依赖级别处理策略：
+    - self: 只执行起始表（如果是DataModel类型）
+    - resource/source: 执行所有依赖链中的DataModel脚本
+    """
     # 获取任务间共享变量
     ti = context['ti']
     dependency_chain = ti.xcom_pull(task_ids='prepare_dependency_chain', key='dependency_chain')
     
-    # 过滤出DataModel类型的表
-    model_scripts = [item for item in dependency_chain if item['table_type'] == 'DataModel']
+    # 直接从XCom获取依赖级别，避免重复解析
+    dependency_level = ti.xcom_pull(task_ids='prepare_dependency_chain', key='dependency_level')
     
-    logger.info(f"要执行的DataModel脚本: {[item['table_name'] for item in model_scripts]}")
+    # 记录当前任务的依赖级别
+    logger.info(f"process_models任务 - 当前依赖级别: {dependency_level}")
+    
+    # 获取表名（在所有级别都需要）
+    params = context.get('params', {})
+    table_name = params.get('TABLE_NAME') or params.get('table_name')
+    logger.info(f"目标表: {table_name}")
+    
+    # 如果依赖级别是'self'，只处理起始表
+    if dependency_level == 'self':
+        logger.info(f"依赖级别为'self'，只处理起始表: {table_name}")
+        model_scripts = [item for item in dependency_chain if item['table_name'] == table_name and item['table_type'] == 'DataModel']
+    else:
+        # 否则处理所有DataModel表
+        logger.info(f"依赖级别为'{dependency_level}'，处理所有DataModel表")
+        model_scripts = [item for item in dependency_chain if item['table_type'] == 'DataModel']
+    
+    if not model_scripts:
+        logger.info("没有找到DataModel类型的表需要处理")
+        return True
+    
+    # 详细记录要执行的脚本信息
+    logger.info(f"要执行的DataModel脚本数量: {len(model_scripts)}")
+    for idx, item in enumerate(model_scripts, 1):
+        logger.info(f"Model脚本[{idx}]: 表={item['table_name']}, 脚本={item['script_name']}, 模式={item['execution_mode']}")
     
     # 执行所有DataModel脚本
     return execute_scripts(model_scripts)
@@ -460,7 +633,7 @@ def process_models(**context):
 with DAG(
     'dag_manual_dependency_trigger',
     default_args=default_args,
-    description='手动触发指定表的依赖链执行（使用networkx优化依赖路径）',
+    description='手动触发指定表的依赖链执行，支持三种依赖级别：self(仅本表)、resource(到Resource层但不执行Resource)、source(完整依赖到Source层)',
     schedule_interval=None,  # 设置为None表示只能手动触发
     catchup=False,
     is_paused_upon_creation=False,  # 添加这一行，使DAG创建时不处于暂停状态
@@ -470,7 +643,14 @@ with DAG(
             'type': 'string',
             'enum': ['self', 'resource', 'source'],
             'default': 'resource',
-            'description': '依赖级别: self-仅本表, resource-到Resource层, source-到Source层'
+            'description': '依赖级别: self-仅本表, resource-到Resource层(不执行Resource脚本), source-到Source层'
+        },
+        # 添加旧参数名，保持兼容性
+        'UPPER_LEVEL_STOP': {
+            'type': 'string',
+            'enum': ['self', 'resource', 'source'],
+            'default': 'resource',
+            'description': '依赖级别(旧参数名): self-仅本表, resource-到Resource层(不执行Resource脚本), source-到Source层'
         }
     },
 ) as dag:
