@@ -7,9 +7,51 @@ from utils import get_enabled_tables, is_data_model_table, run_model_script, get
 from config import NEO4J_CONFIG
 import pendulum
 import logging
+import networkx as nx
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
+
+def generate_optimized_execution_order(table_names: list) -> list:
+    """
+    生成优化的执行顺序，可处理循环依赖    
+    参数:
+        table_names: 表名列表    
+    返回:
+        list: 优化后的执行顺序列表
+    """
+    # 创建依赖图
+    G = nx.DiGraph()
+    
+    # 添加所有节点
+    for table_name in table_names:
+        G.add_node(table_name)
+    
+    # 添加依赖边
+    dependency_dict = get_model_dependency_graph(table_names)
+    for target, upstreams in dependency_dict.items():
+        for upstream in upstreams:
+            if upstream in table_names:  # 确保只考虑目标表集合中的表
+                G.add_edge(upstream, target)
+    
+    # 检测循环依赖
+    cycles = list(nx.simple_cycles(G))
+    if cycles:
+        logger.warning(f"检测到循环依赖，将尝试打破循环: {cycles}")
+        # 打破循环依赖（简单策略：移除每个循环中的一条边）
+        for cycle in cycles:
+            # 移除循环中的最后一条边
+            G.remove_edge(cycle[-1], cycle[0])
+            logger.info(f"打破循环依赖: 移除 {cycle[-1]} -> {cycle[0]} 的依赖")
+    
+    # 生成拓扑排序
+    try:
+        execution_order = list(nx.topological_sort(G))
+        return execution_order
+    except Exception as e:
+        logger.error(f"生成执行顺序失败: {str(e)}")
+        # 返回原始列表作为备选
+        return table_names
 
 def is_first_day():
     return True
@@ -51,9 +93,15 @@ with DAG("dag_data_model_monthly", start_date=datetime(2024, 1, 1), schedule_int
                 logger.info("没有找到需要处理的月模型表，DAG将直接标记为完成")
                 wait_for_weekly >> monthly_completed
             else:
-                # 获取依赖图
+                # 获取表名列表
+                table_names = [t['table_name'] for t in model_tables]
+                
+                # 使用优化函数生成执行顺序，可以处理循环依赖
+                optimized_table_order = generate_optimized_execution_order(table_names)
+                logger.info(f"生成优化执行顺序, 共 {len(optimized_table_order)} 个表")
+                
+                # 获取依赖图 (仍然需要用于设置任务依赖关系)
                 try:
-                    table_names = [t['table_name'] for t in model_tables]
                     dependency_graph = get_model_dependency_graph(table_names)
                     logger.info(f"构建了 {len(dependency_graph)} 个表的依赖关系图")
                 except Exception as e:
@@ -64,20 +112,23 @@ with DAG("dag_data_model_monthly", start_date=datetime(2024, 1, 1), schedule_int
 
                 # 构建 task 对象
                 task_dict = {}
-                for item in model_tables:
-                    try:
-                        task = PythonOperator(
-                            task_id=f"process_monthly_{item['table_name']}",
-                            python_callable=run_model_script,
-                            op_kwargs={"table_name": item['table_name'], "execution_mode": item['execution_mode']},
-                        )
-                        task_dict[item['table_name']] = task
-                        logger.info(f"创建模型处理任务: process_monthly_{item['table_name']}")
-                    except Exception as e:
-                        logger.error(f"创建任务 process_monthly_{item['table_name']} 时出错: {str(e)}")
-                        # 出错时也要确保完成标记被触发
-                        wait_for_weekly >> monthly_completed
-                        raise
+                for table_name in optimized_table_order:
+                    # 获取表的配置信息
+                    table_config = next((t for t in model_tables if t['table_name'] == table_name), None)
+                    if table_config:
+                        try:
+                            task = PythonOperator(
+                                task_id=f"process_monthly_{table_name}",
+                                python_callable=run_model_script,
+                                op_kwargs={"table_name": table_name, "execution_mode": table_config['execution_mode']},
+                            )
+                            task_dict[table_name] = task
+                            logger.info(f"创建模型处理任务: process_monthly_{table_name}")
+                        except Exception as e:
+                            logger.error(f"创建任务 process_monthly_{table_name} 时出错: {str(e)}")
+                            # 出错时也要确保完成标记被触发
+                            wait_for_weekly >> monthly_completed
+                            raise
 
                 # 建立任务依赖（基于 DERIVED_FROM 图）
                 dependency_count = 0
@@ -101,7 +152,8 @@ with DAG("dag_data_model_monthly", start_date=datetime(2024, 1, 1), schedule_int
                 if top_level_tasks:
                     logger.info(f"发现 {len(top_level_tasks)} 个顶层任务: {', '.join(top_level_tasks)}")
                     for name in top_level_tasks:
-                        wait_for_weekly >> task_dict[name]
+                        if name in task_dict:
+                            wait_for_weekly >> task_dict[name]
                 else:
                     logger.warning("没有找到顶层任务，请检查依赖关系图是否正确")
                     # 如果没有顶层任务，直接将等待任务与完成标记相连接
