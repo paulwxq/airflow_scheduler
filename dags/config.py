@@ -23,6 +23,12 @@ AIRFLOW_CONFIG = {
     "password": "admin",
 }
 
+# 任务重试配置
+TASK_RETRY_CONFIG = {
+    "retries": 2,  # 重试次数
+    "retry_delay_minutes": 1  # 重试延迟（分钟）
+}
+
 # 脚本文件基础路径配置
 # 部署到 Airflow 环境时使用此路径
 SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"

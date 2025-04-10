@@ -101,7 +101,7 @@ with DAG(
     schedule_interval="@daily", 
     catchup=False,
     # 添加DAG级别的并行度控制，每个DAG运行最多同时执行2个任务
-    max_active_tasks=8
+    # max_active_tasks=8
     # 无论有多少个DAG运行实例（比如昨天、今天的运行），这个DAG定义的所有实例总共最多有5个任务同时运行
     # concurrency=5
 ) as dag:
