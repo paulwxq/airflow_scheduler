@@ -282,10 +282,69 @@ def write_to_airflow_dag_schedule(exec_date, tables_info):
 
 def prepare_unified_dag_schedule(**kwargs):
     """准备统一DAG调度任务的主函数"""
+    import hashlib
+    
     exec_date = kwargs.get('ds') or get_today_date()
     logger.info(f"开始准备执行日期 {exec_date} 的统一调度任务")
     
-    # 1. 获取启用的表
+    # 检查执行计划文件和ready文件是否存在
+    plan_path = os.path.join(os.path.dirname(__file__), 'last_execution_plan.json')
+    ready_path = f"{plan_path}.ready"
+    files_exist = os.path.exists(plan_path) and os.path.exists(ready_path)
+    
+    if not files_exist:
+        logger.info("执行计划文件或ready标记文件不存在，将重新生成执行计划")
+    
+    # 1. 计算当前订阅表状态的哈希值，用于检测变化
+    def get_subscription_state_hash():
+        """获取订阅表状态的哈希值"""
+        conn = get_pg_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT table_name, schedule_is_enabled
+                FROM schedule_status
+                ORDER BY table_name
+            """)
+            rows = cursor.fetchall()
+            # 将所有行拼接成一个字符串，然后计算哈希值
+            data_str = '|'.join(f"{row[0]}:{row[1]}" for row in rows)
+            return hashlib.md5(data_str.encode()).hexdigest()
+        except Exception as e:
+            logger.error(f"计算订阅表状态哈希值时出错: {str(e)}")
+            return None
+        finally:
+            cursor.close()
+            conn.close()
+    
+    # 获取当前订阅表状态哈希值
+    current_hash = get_subscription_state_hash()
+    if not current_hash:
+        logger.error("无法获取订阅表状态，将中止处理")
+        return 0
+    
+    # 2. 读取上次记录的哈希值
+    hash_file = os.path.join(os.path.dirname(__file__), '.subscription_state')
+    last_hash = None
+    if os.path.exists(hash_file):
+        try:
+            with open(hash_file, 'r') as f:
+                last_hash = f.read().strip()
+        except Exception as e:
+            logger.warning(f"读取上次订阅状态哈希值失败: {str(e)}")
+    
+    # 3. 如果哈希值相同且文件存在，说明订阅表未变化且执行计划存在，可以提前退出
+    if last_hash == current_hash and files_exist:
+        logger.info("订阅表状态未变化且执行计划文件存在，无需更新执行计划")
+        return 0
+    
+    # 记录重新生成原因
+    if not files_exist:
+        logger.info("执行计划文件或ready标记文件不存在，需要重新生成")
+    else:
+        logger.info(f"检测到订阅表状态变化。旧哈希值: {last_hash}, 新哈希值: {current_hash}")
+    
+    # 4. 获取启用的表
     enabled_tables = get_enabled_tables()
     logger.info(f"从schedule_status表获取到 {len(enabled_tables)} 个启用的表")
     
@@ -293,7 +352,7 @@ def prepare_unified_dag_schedule(**kwargs):
         logger.warning("没有找到启用的表，准备工作结束")
         return 0
     
-    # 2. 获取表的详细信息
+    # 5. 获取表的详细信息
     tables_info = []
     for table_name in enabled_tables:
         table_info = get_table_info_from_neo4j(table_name)
@@ -302,24 +361,24 @@ def prepare_unified_dag_schedule(**kwargs):
     
     logger.info(f"成功获取 {len(tables_info)} 个表的详细信息")
     
-    # 3. 处理依赖关系，添加被动调度的表
+    # 6. 处理依赖关系，添加被动调度的表
     enriched_tables = process_dependencies(tables_info)
     logger.info(f"处理依赖后，总共有 {len(enriched_tables)} 个表")
     
-    # 4. 过滤无效表及其依赖
+    # 7. 过滤无效表及其依赖
     valid_tables = filter_invalid_tables(enriched_tables)
     logger.info(f"过滤无效表后，最终有 {len(valid_tables)} 个有效表")
     
-    # 5. 写入airflow_dag_schedule表
+    # 8. 写入airflow_dag_schedule表
     inserted_count = write_to_airflow_dag_schedule(exec_date, valid_tables)
     
-    # 6. 检查插入操作是否成功，如果失败则抛出异常
+    # 9. 检查插入操作是否成功，如果失败则抛出异常
     if inserted_count == 0 and valid_tables:
         error_msg = f"插入操作失败，无记录被插入到airflow_dag_schedule表，但有{len(valid_tables)}个有效表需要处理"
         logger.error(error_msg)
         raise Exception(error_msg)
     
-    # 7. 保存最新执行计划，供DAG读取使用
+    # 10. 保存最新执行计划，供DAG读取使用
     try:
         # 构建执行计划
         resource_tasks = []
@@ -381,34 +440,47 @@ def prepare_unified_dag_schedule(**kwargs):
             "dependencies": dependencies
         }
         
-        # 保存执行计划到文件
-        plan_path = os.path.join(os.path.dirname(__file__), 'last_execution_plan.json')
-        with open(plan_path, 'w') as f:
-            json.dump(execution_plan, f, indent=2)
-            
-        logger.info(f"保存执行计划到文件: {plan_path}")
+        # 使用临时文件先写入内容，再原子替换，确保写入过程不会被中断
+        temp_plan_path = f"{plan_path}.temp"
         
-        # 验证文件是否成功生成并可读
-        if not os.path.exists(plan_path):
-            raise Exception(f"执行计划文件未成功生成: {plan_path}")
-        
-        # 尝试读取文件验证内容
         try:
-            with open(plan_path, 'r') as f:
-                validation_data = json.load(f)
-                # 验证执行计划内容
-                if not isinstance(validation_data, dict):
-                    raise Exception("执行计划格式无效，应为JSON对象")
-                if "exec_date" not in validation_data:
-                    raise Exception("执行计划缺少exec_date字段")
-                if not isinstance(validation_data.get("resource_tasks", []), list):
-                    raise Exception("执行计划的resource_tasks字段无效")
-                if not isinstance(validation_data.get("model_tasks", []), list):
-                    raise Exception("执行计划的model_tasks字段无效")
-        except json.JSONDecodeError as je:
-            raise Exception(f"执行计划文件内容无效，非法的JSON格式: {str(je)}")
-        except Exception as ve:
-            raise Exception(f"执行计划文件验证失败: {str(ve)}")
+            # 10.1 写入临时文件
+            with open(temp_plan_path, 'w') as f:
+                json.dump(execution_plan, f, indent=2)
+            logger.info(f"已保存执行计划到临时文件: {temp_plan_path}")
+            
+            # 10.2 原子替换正式文件
+            os.replace(temp_plan_path, plan_path)
+            logger.info(f"已替换执行计划文件: {plan_path}")
+            
+            # 10.3 创建ready文件，标记执行计划就绪
+            with open(ready_path, 'w') as f:
+                f.write(datetime.now().isoformat())
+            logger.info(f"已创建ready标记文件: {ready_path}")
+            
+            # 10.4 更新订阅表状态哈希值
+            with open(hash_file, 'w') as f:
+                f.write(current_hash)
+            logger.info(f"已更新订阅表状态哈希值: {current_hash}")
+            
+            # 10.5 触发data_scheduler DAG重新解析
+            data_scheduler_path = os.path.join(os.path.dirname(__file__), 'dag_dataops_unified_data_scheduler.py')
+            if os.path.exists(data_scheduler_path):
+                # 更新文件修改时间，触发Airflow重新解析
+                os.utime(data_scheduler_path, None)
+                logger.info(f"已触发数据调度器DAG重新解析: {data_scheduler_path}")
+            else:
+                logger.warning(f"数据调度器DAG文件不存在: {data_scheduler_path}")
+        except Exception as e:
+            logger.error(f"保存执行计划文件或触发DAG重新解析时出错: {str(e)}")
+            # 出错时清理临时文件
+            if os.path.exists(temp_plan_path):
+                try:
+                    os.remove(temp_plan_path)
+                    logger.info(f"已清理临时文件: {temp_plan_path}")
+                except Exception as rm_e:
+                    logger.error(f"清理临时文件时出错: {str(rm_e)}")
+            raise  # 重新抛出异常，确保任务失败
             
     except Exception as e:
         error_msg = f"保存或验证执行计划文件时出错: {str(e)}"
@@ -470,7 +542,7 @@ def check_execution_plan_file(**kwargs):
 with DAG(
     "dag_dataops_unified_prepare_scheduler",
     start_date=datetime(2024, 1, 1),
-    schedule_interval="@daily",
+    schedule_interval="*/5 * * * *",  # 每10分钟运行一次，而不是每天
     catchup=False,
     default_args={
         'owner': 'airflow',

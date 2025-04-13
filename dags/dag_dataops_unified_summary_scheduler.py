@@ -8,6 +8,7 @@ import logging
 import json
 from decimal import Decimal
 from common import get_pg_conn, get_today_date
+from airflow.models import Variable
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -314,7 +315,7 @@ def summarize_unified_execution(**kwargs):
 with DAG(
     "dag_dataops_unified_summary_scheduler", 
     start_date=datetime(2024, 1, 1), 
-    schedule_interval="@daily", 
+    schedule_interval="*/10 * * * *",  # 修改为每15分钟执行一次，与data_scheduler保持一致
     catchup=False,
     default_args={
         'owner': 'airflow',
@@ -326,16 +327,44 @@ with DAG(
     }
 ) as dag:
     
-    # 等待统一数据处理DAG完成
-    wait_for_data_processing = ExternalTaskSensor(
-        task_id="wait_for_data_processing",
-        external_dag_id="dag_dataops_unified_data_scheduler",
-        external_task_id="processing_completed",
-        mode="poke",
-        timeout=3600,
-        poke_interval=30,
-        dag=dag
-    )
+    # 检查是否跳过等待外部任务
+    skip_wait = Variable.get("skip_summary_wait", default_var="false").lower() == "true"
+    
+    if skip_wait:
+        # 如果跳过等待，创建一个空操作代替
+        wait_for_data_processing = EmptyOperator(
+            task_id="wait_for_data_processing",
+            dag=dag
+        )
+        logger.info("跳过等待外部DAG完成，使用EmptyOperator替代")
+    else:
+        # 等待统一数据处理DAG完成
+        # 定义一个函数来打印并返回执行日期
+        def print_target_date(dt):
+            logger.info(f"===== ExternalTaskSensor等待的目标日期信息 =====")
+            logger.info(f"源DAG: dag_dataops_unified_summary_scheduler")
+            logger.info(f"目标DAG: dag_dataops_unified_data_scheduler")
+            logger.info(f"目标任务: processing_completed")
+            logger.info(f"查找的执行日期: {dt}")
+            logger.info(f"日期字符串格式: {dt.strftime('%Y-%m-%dT%H:%M:%S')}")
+            logger.info(f"日期类型: {type(dt)}")
+            logger.info(f"=======================================")
+            # 必须返回原始日期，不能修改
+            return dt
+
+        wait_for_data_processing = ExternalTaskSensor(
+            task_id="wait_for_data_processing",
+            external_dag_id="dag_dataops_unified_data_scheduler",
+            external_task_id="processing_completed",
+            mode="reschedule",  # 改为reschedule模式，不会占用worker
+            timeout=7200,  # 增加超时时间到2小时
+            poke_interval=60,  # 增加检查间隔到1分钟
+            allowed_states=["success", "skipped"],  # 允许成功或跳过的状态
+            failed_states=["failed", "upstream_failed"],  # 当检测到这些状态时立即失败
+            dag=dag,
+            # 添加自定义方法来打印和返回日期
+            execution_date_fn=print_target_date
+        )
     
     # 汇总执行情况
     summarize_task = PythonOperator(

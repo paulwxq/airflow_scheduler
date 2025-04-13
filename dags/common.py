@@ -97,24 +97,62 @@ def execute_script(script_name, table_name, execution_mode):
         return False
     
     try:
-        # 直接使用配置的部署路径
+        # 检查脚本路径
         script_path = Path(SCRIPTS_BASE_PATH) / script_name
-        logger.info(f"使用配置的Airflow部署路径: {script_path}")
+        logger.info(f"准备执行脚本，完整路径: {script_path}")
+        
+        # 检查脚本路径是否存在
+        if not os.path.exists(script_path):
+            logger.error(f"脚本文件不存在: {script_path}")
+            logger.error(f"请确认脚本文件已部署到正确路径: {SCRIPTS_BASE_PATH}")
+            
+            # 尝试列出脚本目录中的文件
+            try:
+                script_dir = Path(SCRIPTS_BASE_PATH)
+                if os.path.exists(script_dir):
+                    files = os.listdir(script_dir)
+                    logger.info(f"可用脚本文件: {files}")
+                else:
+                    logger.error(f"脚本目录不存在: {script_dir}")
+            except Exception as le:
+                logger.error(f"尝试列出脚本目录内容时出错: {str(le)}")
+                
+            return False
+            
+        logger.info(f"脚本文件存在，开始导入: {script_path}")
         
         # 动态导入模块
-        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        
-        # 使用标准入口函数run
-        if hasattr(module, "run"):
-            logger.info(f"执行脚本 {script_name} 的标准入口函数 run()")
-            result = module.run(table_name=table_name, execution_mode=execution_mode)
-            logger.info(f"脚本 {script_name} 执行结果: {result}")
-            return result
-        else:
-            logger.warning(f"脚本 {script_name} 未定义标准入口函数 run()，无法执行")
+        try:
+            spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
+            if spec is None:
+                logger.error(f"无法加载脚本规范: {script_path}")
+                return False
+                
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            logger.info(f"成功导入脚本模块: {script_name}")
+        except ImportError as ie:
+            logger.error(f"导入脚本时出错: {str(ie)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
+        except SyntaxError as se:
+            logger.error(f"脚本语法错误: {str(se)}")
+            logger.error(f"错误位置: {se.filename}, 行 {se.lineno}, 列 {se.offset}")
+            return False
+        
+        # 验证run函数存在
+        if not hasattr(module, "run"):
+            available_funcs = [func for func in dir(module) if callable(getattr(module, func)) and not func.startswith("_")]
+            logger.error(f"脚本 {script_name} 未定义标准入口函数 run()，无法执行")
+            logger.error(f"可用函数: {available_funcs}")
+            return False
+        
+        # 执行run函数
+        logger.info(f"执行脚本 {script_name} 的run函数，参数: table_name={table_name}, execution_mode={execution_mode}")
+        result = module.run(table_name=table_name, execution_mode=execution_mode)
+        logger.info(f"脚本 {script_name} 执行结果: {result}")
+        return result
     except Exception as e:
         logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
         import traceback
