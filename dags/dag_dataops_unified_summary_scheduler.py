@@ -315,7 +315,10 @@ def summarize_unified_execution(**kwargs):
 with DAG(
     "dag_dataops_unified_summary_scheduler", 
     start_date=datetime(2024, 1, 1), 
-    schedule_interval="*/10 * * * *",  # 修改为每15分钟执行一次，与data_scheduler保持一致
+    # 修改为每15分钟执行一次，与data_scheduler保持一致
+    # schedule_interval="*/15 * * * *",  
+    # 修改调度间隔为每日0点执行一次
+    schedule_interval="0 0 * * *",
     catchup=False,
     default_args={
         'owner': 'airflow',

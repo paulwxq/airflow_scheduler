@@ -319,8 +319,10 @@ def handle_dag_failure(context):
 with DAG(
     "dag_dataops_unified_data_scheduler", 
     start_date=datetime(2024, 1, 1), 
-    # 修改调度间隔为每15分钟检查一次，以便及时响应执行计划变化
-    schedule_interval="*/10 * * * *",
+    # 修改调度间隔为每10分钟检查一次，以便及时响应执行计划变化
+    # schedule_interval="*/10 * * * *",
+    # 修改调度间隔为每日0点执行一次
+    schedule_interval="0 0 * * *",
     catchup=False,
     default_args={
         'owner': 'airflow',

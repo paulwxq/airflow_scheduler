@@ -542,7 +542,10 @@ def check_execution_plan_file(**kwargs):
 with DAG(
     "dag_dataops_unified_prepare_scheduler",
     start_date=datetime(2024, 1, 1),
-    schedule_interval="*/5 * * * *",  # 每10分钟运行一次，而不是每天
+    # 每10分钟运行一次，而不是每天
+    # schedule_interval="*/5 * * * *",  
+    # 修改调度间隔为每小时执行一次
+    schedule_interval="0 * * * *",
     catchup=False,
     default_args={
         'owner': 'airflow',
