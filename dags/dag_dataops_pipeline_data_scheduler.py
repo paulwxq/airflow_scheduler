@@ -28,6 +28,87 @@ from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG
 # 创建日志记录器
 logger = logging.getLogger(__name__)
 
+# 开启详细诊断日志记录
+ENABLE_DEBUG_LOGGING = True
+
+def log_debug(message):
+    """记录调试日志，但只在启用调试模式时"""
+    if ENABLE_DEBUG_LOGGING:
+        logger.info(f"[DEBUG] {message}")
+
+# 在DAG启动时输出诊断信息
+log_debug("======== 诊断信息 ========")
+log_debug(f"当前工作目录: {os.getcwd()}")
+log_debug(f"SCRIPTS_BASE_PATH: {SCRIPTS_BASE_PATH}")
+log_debug(f"导入的common模块路径: {get_pg_conn.__module__}")
+
+# 检查数据库连接
+def validate_database_connection():
+    """验证数据库连接是否正常"""
+    try:
+        conn = get_pg_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT version()")
+        version = cursor.fetchone()
+        log_debug(f"数据库连接正常，PostgreSQL版本: {version[0]}")
+        
+        # 检查airflow_dag_schedule表是否存在
+        cursor.execute("""
+            SELECT EXISTS (
+               SELECT FROM information_schema.tables 
+               WHERE table_name = 'airflow_dag_schedule'
+            )
+        """)
+        table_exists = cursor.fetchone()[0]
+        if table_exists:
+            # 检查表结构
+            cursor.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'airflow_dag_schedule'
+            """)
+            columns = cursor.fetchall()
+            log_debug(f"airflow_dag_schedule表存在，列信息:")
+            for col in columns:
+                log_debug(f"  - {col[0]}: {col[1]}")
+            
+            # 查询最新记录数量
+            cursor.execute("SELECT COUNT(*) FROM airflow_dag_schedule")
+            count = cursor.fetchone()[0]
+            log_debug(f"airflow_dag_schedule表中有 {count} 条记录")
+            
+            # 检查最近的执行记录
+            cursor.execute("""
+                SELECT exec_date, COUNT(*) as record_count
+                FROM airflow_dag_schedule
+                GROUP BY exec_date
+                ORDER BY exec_date DESC
+                LIMIT 3
+            """)
+            recent_dates = cursor.fetchall()
+            log_debug(f"最近的执行日期及记录数:")
+            for date_info in recent_dates:
+                log_debug(f"  - {date_info[0]}: {date_info[1]} 条记录")
+        else:
+            log_debug("airflow_dag_schedule表不存在！")
+        
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        log_debug(f"数据库连接验证失败: {str(e)}")
+        import traceback
+        log_debug(f"错误堆栈: {traceback.format_exc()}")
+        return False
+
+# 执行数据库连接验证
+try:
+    validate_database_connection()
+except Exception as e:
+    log_debug(f"验证数据库连接时出错: {str(e)}")
+
+log_debug("======== 诊断信息结束 ========")
+
 #############################################
 # 通用工具函数
 #############################################
@@ -719,7 +800,10 @@ def create_execution_plan(**kwargs):
 
 def process_resource(target_table, script_name, script_exec_mode, exec_date):
     """处理单个资源表"""
+    task_id = f"resource_{target_table}"
+    logger.info(f"===== 开始执行 {task_id} =====")
     logger.info(f"执行资源表 {target_table} 的脚本 {script_name}")
+    
     # 检查exec_date是否是JSON字符串
     if isinstance(exec_date, str) and exec_date.startswith('{'):
         try:
@@ -730,8 +814,14 @@ def process_resource(target_table, script_name, script_exec_mode, exec_date):
         except Exception as e:
             logger.error(f"解析exec_date JSON时出错: {str(e)}")
     
+    # 确保exec_date是字符串
+    if not isinstance(exec_date, str):
+        exec_date = str(exec_date)
+        logger.info(f"将exec_date转换为字符串: {exec_date}")
+    
     try:
         # 正常调用执行监控函数
+        logger.info(f"调用execute_with_monitoring: target_table={target_table}, script_name={script_name}, exec_date={exec_date}")
         result = execute_with_monitoring(
             target_table=target_table,
             script_name=script_name,
@@ -739,15 +829,103 @@ def process_resource(target_table, script_name, script_exec_mode, exec_date):
             exec_date=exec_date
         )
         logger.info(f"资源表 {target_table} 处理完成，结果: {result}")
+        
+        # 验证状态是否正确更新到数据库
+        try:
+            conn = get_pg_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT exec_result, exec_start_time, exec_end_time, exec_duration
+                FROM airflow_dag_schedule
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (exec_date, target_table, script_name))
+            db_record = cursor.fetchone()
+            
+            if db_record:
+                logger.info(f"数据库中任务状态: exec_result={db_record[0]}, start_time={db_record[1]}, end_time={db_record[2]}, duration={db_record[3]}")
+                
+                # 如果数据库中没有结果但执行已完成，尝试再次更新
+                if db_record[0] is None and db_record[1] is not None:
+                    now = datetime.now()
+                    duration = (now - db_record[1]).total_seconds() if db_record[1] else 0
+                    
+                    logger.info(f"数据库中结果为空但已有开始时间，尝试手动更新结果: {result}")
+                    cursor.execute("""
+                        UPDATE airflow_dag_schedule
+                        SET exec_result = %s, exec_end_time = %s, exec_duration = %s
+                        WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                    """, (result, now, duration, exec_date, target_table, script_name))
+                    conn.commit()
+                    logger.info(f"手动更新结果行数: {cursor.rowcount}")
+            else:
+                logger.warning(f"在数据库中未找到任务记录")
+            
+            cursor.close()
+            conn.close()
+        except Exception as verify_e:
+            logger.error(f"验证任务状态时出错: {str(verify_e)}")
+        
         return result
     except Exception as e:
         logger.error(f"处理资源表 {target_table} 时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 尝试直接在这里更新错误状态
+        try:
+            conn = get_pg_conn()
+            cursor = conn.cursor()
+            now = datetime.now()
+            
+            # 检查是否已有开始时间
+            cursor.execute("""
+                SELECT exec_start_time 
+                FROM airflow_dag_schedule 
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (exec_date, target_table, script_name))
+            start_time_record = cursor.fetchone()
+            
+            if start_time_record and start_time_record[0]:
+                start_time = start_time_record[0]
+                duration = (now - start_time).total_seconds()
+            else:
+                # 如果没有开始时间，则使用0秒持续时间并记录开始时间
+                duration = 0
+                cursor.execute("""
+                    UPDATE airflow_dag_schedule
+                    SET exec_start_time = %s
+                    WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                """, (now, exec_date, target_table, script_name))
+                logger.info("未找到开始时间，手动设置开始时间")
+                
+            # 更新为失败状态
+            cursor.execute("""
+                UPDATE airflow_dag_schedule 
+                SET exec_result = FALSE, exec_end_time = %s, exec_duration = %s
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (now, duration, exec_date, target_table, script_name))
+            conn.commit()
+            logger.info(f"手动更新任务失败状态: {target_table}, 影响行数: {cursor.rowcount}")
+        except Exception as db_e:
+            logger.error(f"尝试手动更新失败状态时出错: {str(db_e)}")
+        finally:
+            if 'cursor' in locals() and cursor:
+                cursor.close()
+            if 'conn' in locals() and conn:
+                conn.close()
+        
         # 确保即使出错也返回结果，不会阻塞DAG
+        logger.info(f"===== 结束执行 {task_id} (失败) =====")
         return False
+    finally:
+        logger.info(f"===== 结束执行 {task_id} =====")
 
 def process_model(target_table, script_name, script_exec_mode, exec_date):
     """处理单个模型表"""
+    task_id = f"model_{target_table}"
+    logger.info(f"===== 开始执行 {task_id} =====")
     logger.info(f"执行模型表 {target_table} 的脚本 {script_name}")
+    
     # 检查exec_date是否是JSON字符串
     if isinstance(exec_date, str) and exec_date.startswith('{'):
         try:
@@ -758,7 +936,13 @@ def process_model(target_table, script_name, script_exec_mode, exec_date):
         except Exception as e:
             logger.error(f"解析exec_date JSON时出错: {str(e)}")
     
+    # 确保exec_date是字符串
+    if not isinstance(exec_date, str):
+        exec_date = str(exec_date)
+        logger.info(f"将exec_date转换为字符串: {exec_date}")
+    
     try:
+        logger.info(f"调用execute_with_monitoring: target_table={target_table}, script_name={script_name}, exec_date={exec_date}")
         result = execute_with_monitoring(
             target_table=target_table,
             script_name=script_name,
@@ -766,11 +950,96 @@ def process_model(target_table, script_name, script_exec_mode, exec_date):
             exec_date=exec_date
         )
         logger.info(f"模型表 {target_table} 处理完成，结果: {result}")
+        
+        # 验证状态是否正确更新到数据库
+        try:
+            conn = get_pg_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT exec_result, exec_start_time, exec_end_time, exec_duration
+                FROM airflow_dag_schedule
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (exec_date, target_table, script_name))
+            db_record = cursor.fetchone()
+            
+            if db_record:
+                logger.info(f"数据库中任务状态: exec_result={db_record[0]}, start_time={db_record[1]}, end_time={db_record[2]}, duration={db_record[3]}")
+                
+                # 如果数据库中没有结果但执行已完成，尝试再次更新
+                if db_record[0] is None and db_record[1] is not None:
+                    now = datetime.now()
+                    duration = (now - db_record[1]).total_seconds() if db_record[1] else 0
+                    
+                    logger.info(f"数据库中结果为空但已有开始时间，尝试手动更新结果: {result}")
+                    cursor.execute("""
+                        UPDATE airflow_dag_schedule
+                        SET exec_result = %s, exec_end_time = %s, exec_duration = %s
+                        WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                    """, (result, now, duration, exec_date, target_table, script_name))
+                    conn.commit()
+                    logger.info(f"手动更新结果行数: {cursor.rowcount}")
+            else:
+                logger.warning(f"在数据库中未找到任务记录")
+            
+            cursor.close()
+            conn.close()
+        except Exception as verify_e:
+            logger.error(f"验证任务状态时出错: {str(verify_e)}")
+        
         return result
     except Exception as e:
         logger.error(f"处理模型表 {target_table} 时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 尝试直接在这里更新错误状态
+        try:
+            conn = get_pg_conn()
+            cursor = conn.cursor()
+            now = datetime.now()
+            
+            # 检查是否已有开始时间
+            cursor.execute("""
+                SELECT exec_start_time 
+                FROM airflow_dag_schedule 
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (exec_date, target_table, script_name))
+            start_time_record = cursor.fetchone()
+            
+            if start_time_record and start_time_record[0]:
+                start_time = start_time_record[0]
+                duration = (now - start_time).total_seconds()
+            else:
+                # 如果没有开始时间，则使用0秒持续时间并记录开始时间
+                duration = 0
+                cursor.execute("""
+                    UPDATE airflow_dag_schedule
+                    SET exec_start_time = %s
+                    WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                """, (now, exec_date, target_table, script_name))
+                logger.info("未找到开始时间，手动设置开始时间")
+                
+            # 更新为失败状态
+            cursor.execute("""
+                UPDATE airflow_dag_schedule 
+                SET exec_result = FALSE, exec_end_time = %s, exec_duration = %s
+                WHERE exec_date = %s AND target_table = %s AND script_name = %s
+            """, (now, duration, exec_date, target_table, script_name))
+            conn.commit()
+            logger.info(f"手动更新任务失败状态: {target_table}, 影响行数: {cursor.rowcount}")
+        except Exception as db_e:
+            logger.error(f"尝试手动更新失败状态时出错: {str(db_e)}")
+        finally:
+            if 'cursor' in locals() and cursor:
+                cursor.close()
+            if 'conn' in locals() and conn:
+                conn.close()
+        
         # 确保即使出错也返回结果，不会阻塞DAG
+        logger.info(f"===== 结束执行 {task_id} (失败) =====")
         return False
+    finally:
+        logger.info(f"===== 结束执行 {task_id} =====")
 
 #############################################
 # 第三阶段: 汇总阶段(Summary Phase)的函数
@@ -1210,7 +1479,9 @@ with DAG(
                                     "target_table": table_name,
                                     "script_name": script_name,
                                     "script_exec_mode": exec_mode,
-                                    "exec_date": exec_date
+                                    # 确保使用字符串而不是可能是默认（非字符串）格式的执行日期
+                                    # 这样 execute_with_monitoring 函数才能正确更新数据库
+                                    "exec_date": str(exec_date)
                                 },
                                 retries=TASK_RETRY_CONFIG["retries"],
                                 retry_delay=timedelta(minutes=TASK_RETRY_CONFIG["retry_delay_minutes"])
@@ -1276,7 +1547,9 @@ with DAG(
                                     "target_table": table_name,
                                     "script_name": script_name,
                                     "script_exec_mode": exec_mode,
-                                    "exec_date": exec_date
+                                    # 确保使用字符串而不是可能是默认（非字符串）格式的执行日期
+                                    # 这样 execute_with_monitoring 函数才能正确更新数据库
+                                    "exec_date": str(exec_date)
                                 },
                                 retries=TASK_RETRY_CONFIG["retries"],
                                 retry_delay=timedelta(minutes=TASK_RETRY_CONFIG["retry_delay_minutes"])
