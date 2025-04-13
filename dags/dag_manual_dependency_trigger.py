@@ -636,7 +636,7 @@ with DAG(
     description='手动触发指定表的依赖链执行，支持三种依赖级别：self(仅本表)、resource(到Resource层但不执行Resource)、source(完整依赖到Source层)',
     schedule_interval=None,  # 设置为None表示只能手动触发
     catchup=False,
-    is_paused_upon_creation=False,  # 添加这一行，使DAG创建时不处于暂停状态
+    is_paused_upon_creation=True,  # 添加这一行，使DAG创建时不处于暂停状态
     params={
         'TABLE_NAME': '',
         'DEPENDENCY_LEVEL': {

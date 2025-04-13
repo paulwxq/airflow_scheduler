@@ -1,11 +1,12 @@
 # dag_dataops_unified_prepare_scheduler.py
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.operators.empty import EmptyOperator
 from datetime import datetime, timedelta
 import logging
 import networkx as nx
 import json
+import os
 from common import (
     get_pg_conn, 
     get_neo4j_driver,
@@ -381,16 +382,89 @@ def prepare_unified_dag_schedule(**kwargs):
         }
         
         # 保存执行计划到文件
-        import os
         plan_path = os.path.join(os.path.dirname(__file__), 'last_execution_plan.json')
         with open(plan_path, 'w') as f:
             json.dump(execution_plan, f, indent=2)
             
         logger.info(f"保存执行计划到文件: {plan_path}")
+        
+        # 验证文件是否成功生成并可读
+        if not os.path.exists(plan_path):
+            raise Exception(f"执行计划文件未成功生成: {plan_path}")
+        
+        # 尝试读取文件验证内容
+        try:
+            with open(plan_path, 'r') as f:
+                validation_data = json.load(f)
+                # 验证执行计划内容
+                if not isinstance(validation_data, dict):
+                    raise Exception("执行计划格式无效，应为JSON对象")
+                if "exec_date" not in validation_data:
+                    raise Exception("执行计划缺少exec_date字段")
+                if not isinstance(validation_data.get("resource_tasks", []), list):
+                    raise Exception("执行计划的resource_tasks字段无效")
+                if not isinstance(validation_data.get("model_tasks", []), list):
+                    raise Exception("执行计划的model_tasks字段无效")
+        except json.JSONDecodeError as je:
+            raise Exception(f"执行计划文件内容无效，非法的JSON格式: {str(je)}")
+        except Exception as ve:
+            raise Exception(f"执行计划文件验证失败: {str(ve)}")
+            
     except Exception as e:
-        logger.error(f"保存执行计划时出错: {str(e)}")
+        error_msg = f"保存或验证执行计划文件时出错: {str(e)}"
+        logger.error(error_msg)
+        # 强制抛出异常，确保任务失败，阻止下游DAG执行
+        raise Exception(error_msg)
     
     return inserted_count
+
+def check_execution_plan_file(**kwargs):
+    """
+    检查执行计划文件是否存在且有效
+    返回False将阻止所有下游任务执行
+    """
+    logger.info("检查执行计划文件是否存在且有效")
+    plan_path = os.path.join(os.path.dirname(__file__), 'last_execution_plan.json')
+    
+    # 检查文件是否存在
+    if not os.path.exists(plan_path):
+        logger.error(f"执行计划文件不存在: {plan_path}")
+        return False
+    
+    # 检查文件是否可读且内容有效
+    try:
+        with open(plan_path, 'r') as f:
+            data = json.load(f)
+            
+            # 检查必要字段
+            if "exec_date" not in data:
+                logger.error("执行计划缺少exec_date字段")
+                return False
+                
+            if not isinstance(data.get("resource_tasks", []), list):
+                logger.error("执行计划的resource_tasks字段无效")
+                return False
+                
+            if not isinstance(data.get("model_tasks", []), list):
+                logger.error("执行计划的model_tasks字段无效")
+                return False
+            
+            # 检查是否有任务数据
+            resource_tasks = data.get("resource_tasks", [])
+            model_tasks = data.get("model_tasks", [])
+            if not resource_tasks and not model_tasks:
+                logger.warning("执行计划不包含任何任务，但文件格式有效")
+                # 注意：即使没有任务，我们仍然允许流程继续
+            
+            logger.info(f"执行计划文件验证成功: 包含 {len(resource_tasks)} 个资源任务和 {len(model_tasks)} 个模型任务")
+            return True
+            
+    except json.JSONDecodeError as je:
+        logger.error(f"执行计划文件不是有效的JSON: {str(je)}")
+        return False
+    except Exception as e:
+        logger.error(f"检查执行计划文件时出错: {str(e)}")
+        return False
 
 # 创建DAG
 with DAG(
@@ -422,6 +496,13 @@ with DAG(
         dag=dag
     )
     
+    # 检查执行计划文件
+    check_plan_file = ShortCircuitOperator(
+        task_id="check_execution_plan_file",
+        python_callable=check_execution_plan_file,
+        dag=dag
+    )
+    
     # 准备完成标记
     preparation_completed = EmptyOperator(
         task_id="preparation_completed",
@@ -429,4 +510,4 @@ with DAG(
     )
     
     # 设置任务依赖
-    start_preparation >> prepare_task >> preparation_completed
+    start_preparation >> prepare_task >> check_plan_file >> preparation_completed

@@ -31,6 +31,7 @@ TASK_RETRY_CONFIG = {
 
 # 脚本文件基础路径配置
 # 部署到 Airflow 环境时使用此路径
+AIRFLOW_BASE_PATH='/opt/airflow'
 SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"
 
 # 本地开发环境脚本路径（如果需要区分环境）
