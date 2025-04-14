@@ -23,6 +23,7 @@ from common import (
     get_today_date
 )
 from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG
+import pytz
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -436,6 +437,10 @@ def filter_invalid_tables(tables_info):
 def prepare_dag_schedule(**kwargs):
     """准备DAG调度任务的主函数"""
     exec_date = kwargs.get('ds') or get_today_date()
+    execution_date = kwargs.get('execution_date')
+    
+    # 记录重要的时间参数
+    logger.info(f"【时间参数】prepare_dag_schedule: ds={exec_date}, execution_date={execution_date}")
     logger.info(f"开始准备执行日期 {exec_date} 的统一调度任务")
     
     # 1. 获取启用的表
@@ -528,18 +533,22 @@ def prepare_dag_schedule(**kwargs):
     }
     
     # 将执行计划保存到XCom
-    kwargs['ti'].xcom_push(key='execution_plan', value=json.dumps(execution_plan, default=json_serial))
+    kwargs['ti'].xcom_push(key='execution_plan', value=execution_plan)
     logger.info(f"准备了执行计划，包含 {len(resource_tasks)} 个资源表任务和 {len(model_tasks)} 个模型表任务")
     
     return len(valid_tables)
 
-def check_execution_plan_file(**kwargs):
+def check_execution_plan(**kwargs):
     """
     检查执行计划是否存在且有效
     返回False将阻止所有下游任务执行
     """
-    logger.info("检查数据库中的执行计划是否存在且有效")
+    execution_date = kwargs.get('execution_date')
     exec_date = kwargs.get('ds') or get_today_date()
+    
+    # 记录重要的时间参数
+    logger.info(f"【时间参数】check_execution_plan: ds={exec_date}, execution_date={execution_date}")
+    logger.info("检查数据库中的执行计划是否存在且有效")
     
     # 从数据库获取执行计划
     execution_plan = get_execution_plan_from_db(exec_date)
@@ -634,13 +643,18 @@ def get_table_dependencies(table_names):
 def create_execution_plan(**kwargs):
     """准备执行计划的函数，使用从准备阶段传递的数据"""
     try:
+        execution_date = kwargs.get('execution_date')
+        exec_date = kwargs.get('ds') or get_today_date()
+        
+        # 记录重要的时间参数
+        logger.info(f"【时间参数】create_execution_plan: ds={exec_date}, execution_date={execution_date}")
+        
         # 从XCom获取执行计划
         execution_plan = kwargs['ti'].xcom_pull(task_ids='prepare_phase.prepare_dag_schedule', key='execution_plan')
         
         # 如果找不到执行计划，则从数据库获取
         if not execution_plan:
             # 获取执行日期
-            exec_date = kwargs.get('ds') or get_today_date()
             logger.info(f"未找到执行计划，从数据库获取。使用执行日期: {exec_date}")
             
             # 获取所有任务
@@ -663,10 +677,10 @@ def create_execution_plan(**kwargs):
             }
             
             # 保存执行计划到XCom
-            kwargs['ti'].xcom_push(key='execution_plan', value=json.dumps(new_execution_plan, default=json_serial))
+            kwargs['ti'].xcom_push(key='execution_plan', value=new_execution_plan)
             logger.info(f"创建新的执行计划，包含 {len(resource_tasks)} 个资源表任务和 {len(model_tasks)} 个模型表任务")
             
-            return json.dumps(new_execution_plan, default=json_serial)
+            return new_execution_plan
         
         logger.info(f"成功获取执行计划")
         return execution_plan
@@ -680,23 +694,13 @@ def create_execution_plan(**kwargs):
             "dependencies": {}
         }
         
-        return json.dumps(empty_plan, default=json_serial)
+        return empty_plan
 
 def process_resource(target_table, script_name, script_exec_mode, exec_date):
     """处理单个资源表"""
     task_id = f"resource_{target_table}"
     logger.info(f"===== 开始执行 {task_id} =====")
     logger.info(f"执行资源表 {target_table} 的脚本 {script_name}")
-    
-    # 检查exec_date是否是JSON字符串
-    if isinstance(exec_date, str) and exec_date.startswith('{'):
-        try:
-            # 尝试解析JSON字符串
-            exec_date_data = json.loads(exec_date)
-            exec_date = exec_date_data.get("exec_date")
-            logger.info(f"从JSON中提取执行日期: {exec_date}")
-        except Exception as e:
-            logger.error(f"解析exec_date JSON时出错: {str(e)}")
     
     # 确保exec_date是字符串
     if not isinstance(exec_date, str):
@@ -728,16 +732,6 @@ def process_model(target_table, script_name, script_exec_mode, exec_date):
     task_id = f"model_{target_table}"
     logger.info(f"===== 开始执行 {task_id} =====")
     logger.info(f"执行模型表 {target_table} 的脚本 {script_name}")
-    
-    # 检查exec_date是否是JSON字符串
-    if isinstance(exec_date, str) and exec_date.startswith('{'):
-        try:
-            # 尝试解析JSON字符串
-            exec_date_data = json.loads(exec_date)
-            exec_date = exec_date_data.get("exec_date")
-            logger.info(f"从JSON中提取执行日期: {exec_date}")
-        except Exception as e:
-            logger.error(f"解析exec_date JSON时出错: {str(e)}")
     
     # 确保exec_date是字符串
     if not isinstance(exec_date, str):
@@ -775,18 +769,29 @@ def get_execution_stats(exec_date):
     """
     from airflow.models import DagRun, TaskInstance
     from airflow.utils.state import State
+    from sqlalchemy import desc
+    from airflow import settings
     
-    logger.info(f"获取执行日期 {exec_date} 的执行统计信息")
+    # 记录原始输入参数，仅供参考
+    logger.debug(f"【执行日期】get_execution_stats接收到 exec_date: {exec_date}, 类型: {type(exec_date)}")
+    logger.debug(f"获取执行日期 {exec_date} 的执行统计信息")
     
     # 当前DAG ID
     dag_id = "dag_dataops_pipeline_data_scheduler"
     
     try:
-        # 查找对应的DAG运行
-        dag_runs = DagRun.find(dag_id=dag_id, execution_date=exec_date)
+        # 直接查询最近的DAG运行，不依赖于精确的执行日期
+        logger.debug("忽略精确的执行日期，直接查询最近的DAG运行")
+        session = settings.Session()
+        
+        # 查询最近的DAG运行，按updated_at降序排序
+        dag_runs = session.query(DagRun).filter(
+            DagRun.dag_id == dag_id
+        ).order_by(desc(DagRun.updated_at)).limit(1).all()
         
         if not dag_runs:
-            logger.warning(f"未找到DAG {dag_id} 在 {exec_date} 的运行记录")
+            logger.warning(f"未找到DAG {dag_id} 的任何运行记录")
+            session.close()
             return {
                 "exec_date": exec_date,
                 "total_tasks": 0,
@@ -802,9 +807,19 @@ def get_execution_stats(exec_date):
             }
         
         dag_run = dag_runs[0]
+        logger.debug(f"找到最近的DAG运行: execution_date={dag_run.execution_date}, updated_at={dag_run.updated_at}, state={dag_run.state}")
         
-        # 获取所有任务实例
-        task_instances = TaskInstance.find(dag_id=dag_id, execution_date=dag_run.execution_date)
+        # 直接查询最近更新的任务实例，不再通过execution_date过滤
+        # 只通过dag_id过滤，按更新时间降序排序
+        task_instances = session.query(TaskInstance).filter(
+            TaskInstance.dag_id == dag_id
+        ).order_by(desc(TaskInstance.updated_at)).limit(100).all()  # 获取最近100条记录
+        
+        # 日志记录找到的任务实例数量
+        logger.debug(f"找到 {len(task_instances)} 个最近的任务实例")
+        
+        # 关闭会话
+        session.close()
         
         # 统计任务状态
         total_tasks = len(task_instances)
@@ -849,6 +864,8 @@ def get_execution_stats(exec_date):
         # 汇总统计信息
         stats = {
             "exec_date": exec_date,
+            "dag_run_execution_date": dag_run.execution_date,
+            "dag_run_updated_at": dag_run.updated_at,
             "total_tasks": total_tasks,
             "type_counts": type_counts,
             "success_count": success_count,
@@ -866,52 +883,16 @@ def get_execution_stats(exec_date):
         logger.error(f"获取执行统计信息时出错: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        return {}
+        # 在出错时显式抛出异常，确保任务失败
+        raise
 
 def generate_execution_report(exec_date, stats):
-    """生成执行报告"""
-    # 构建报告
+    """生成简化的执行报告，只包含基本信息"""
+    # 构建简化报告
     report = []
     report.append(f"========== 数据运维系统执行报告 ==========")
     report.append(f"执行日期: {exec_date}")
     report.append(f"总任务数: {stats['total_tasks']}")
-    
-    # 任务类型分布
-    report.append("\n--- 任务类型分布 ---")
-    for label, count in stats.get('type_counts', {}).items():
-        report.append(f"{label} 任务: {count} 个")
-    
-    # 执行结果统计
-    report.append("\n--- 执行结果统计 ---")
-    report.append(f"成功任务: {stats.get('success_count', 0)} 个")
-    report.append(f"失败任务: {stats.get('fail_count', 0)} 个")
-    report.append(f"未执行任务: {stats.get('pending_count', 0)} 个")
-    report.append(f"成功率: {stats.get('success_rate', 0):.2f}%")
-    
-    # 执行时间统计
-    report.append("\n--- 执行时间统计 (秒) ---")
-    avg_duration = stats.get('avg_duration')
-    min_duration = stats.get('min_duration')
-    max_duration = stats.get('max_duration')
-    
-    report.append(f"平均执行时间: {avg_duration:.2f}" if avg_duration is not None else "平均执行时间: N/A")
-    report.append(f"最短执行时间: {min_duration:.2f}" if min_duration is not None else "最短执行时间: N/A")
-    report.append(f"最长执行时间: {max_duration:.2f}" if max_duration is not None else "最长执行时间: N/A")
-    
-    # 失败任务详情
-    failed_tasks = stats.get('failed_tasks', [])
-    if failed_tasks:
-        report.append("\n--- 失败任务详情 ---")
-        for i, task in enumerate(failed_tasks, 1):
-            report.append(f"{i}. 任务ID: {task['task_id']}")
-            report.append(f"   状态: {task['state']}")
-            exec_duration = task.get('exec_duration')
-            if exec_duration is not None:
-                report.append(f"   执行时间: {exec_duration:.2f} 秒")
-            else:
-                report.append("   执行时间: N/A")
-    
-    report.append("\n========== 报告结束 ==========")
     
     # 将报告转换为字符串
     report_str = "\n".join(report)
@@ -923,79 +904,96 @@ def generate_execution_report(exec_date, stats):
 
 def summarize_execution(**kwargs):
     """简化的汇总执行情况函数，只判断整个作业是否成功"""
-    try:
-        exec_date = kwargs.get('ds') or get_today_date()
-        logger.info(f"开始汇总执行日期 {exec_date} 的执行情况")
+    exec_date = kwargs.get('ds') or get_today_date()
+    execution_date = kwargs.get('execution_date')
+    
+    # 记录重要的时间参数，仅供参考
+    logger.debug(f"【时间参数】summarize_execution: ds={exec_date}, execution_date={execution_date}")
+    logger.debug(f"开始汇总执行日期 {exec_date} 的执行情况")
+    
+    # 获取任务实例对象
+    task_instance = kwargs.get('ti')
+    dag_id = task_instance.dag_id
+    
+    # 获取DAG运行状态信息 - 直接查询最近的运行
+    from airflow.models import DagRun
+    from airflow.utils.state import State
+    from sqlalchemy import desc
+    from airflow import settings
+    
+    logger.debug("直接查询最近更新的DAG运行记录，不依赖执行日期")
+    session = settings.Session()
+    
+    # 查询最近的DAG运行，按updated_at降序排序
+    dag_runs = session.query(DagRun).filter(
+        DagRun.dag_id == dag_id
+    ).order_by(desc(DagRun.updated_at)).limit(1).all()
+    
+    session.close()
+    
+    if not dag_runs or len(dag_runs) == 0:
+        logger.warning(f"未找到DAG {dag_id} 的任何运行记录")
+        state = "UNKNOWN"
+        success = False
+    else:
+        # 获取状态
+        dag_run = dag_runs[0]  # 取最近更新的DAG运行
+        state = dag_run.state
+        logger.debug(f"找到最近的DAG运行: execution_date={dag_run.execution_date}, updated_at={dag_run.updated_at}, state={state}")
+        logger.debug(f"DAG {dag_id} 的状态为: {state}")
         
-        # 获取任务实例对象
-        task_instance = kwargs.get('ti')
-        dag_id = task_instance.dag_id
-        
-        # 获取DAG运行状态信息
-        from airflow.models import DagRun
-        from airflow.utils.state import State
-        
-        # 查找对应的DAG运行
-        dag_runs = DagRun.find(dag_id=dag_id, execution_date=task_instance.execution_date)
-        
-        if not dag_runs or len(dag_runs) == 0:
-            logger.warning(f"未找到DAG {dag_id} 在执行日期 {exec_date} 的运行记录")
-            state = "UNKNOWN"
-            success = False
-        else:
-            # 获取状态
-            dag_run = dag_runs[0]  # 取第一个匹配的DAG运行
-            state = dag_run.state
-            logger.info(f"DAG {dag_id} 的状态为: {state}")
-            
-            # 判断是否成功
-            success = (state == State.SUCCESS)
-        
-        # 获取更详细的执行统计信息
-        stats = get_execution_stats(exec_date)
-        
-        # 创建简单的报告
-        if success:
-            report = f"DAG {dag_id} 在 {exec_date} 的执行成功完成。"
-            if stats:
-                report += f" 总共有 {stats.get('total_tasks', 0)} 个任务，" \
-                          f"其中成功 {stats.get('success_count', 0)} 个，" \
-                          f"失败 {stats.get('fail_count', 0)} 个。"
-        else:
-            report = f"DAG {dag_id} 在 {exec_date} 的执行未成功完成，状态为: {state}。"
-            if stats and stats.get('failed_tasks'):
-                report += f" 有 {len(stats.get('failed_tasks', []))} 个任务失败。"
-        
-        # 记录执行结果
-        logger.info(report)
-        
-        # 如果 stats 为空，创建一个简单的状态信息
-        if not stats:
-            stats = {
-                "exec_date": exec_date,
-                "success": success,
-                "dag_id": dag_id,
-                "dag_run_state": state
-            }
-        
+        # 判断是否成功
+        success = (state == State.SUCCESS)
+    
+    # 获取更详细的执行统计信息 - 直接调用get_execution_stats而不关心具体日期
+    stats = get_execution_stats(exec_date)
+    
+    # 创建简单的报告
+    if success:
+        report = f"DAG {dag_id} 在 {exec_date} 的执行成功完成。"
+        if stats:
+            report += f" 总共有 {stats.get('total_tasks', 0)} 个任务，" \
+                      f"其中成功 {stats.get('success_count', 0)} 个，" \
+                      f"失败 {stats.get('fail_count', 0)} 个。"
+    else:
+        report = f"DAG {dag_id} 在 {exec_date} 的执行未成功完成，状态为: {state}。"
+        if stats and stats.get('failed_tasks'):
+            report += f" 有 {len(stats.get('failed_tasks', []))} 个任务失败。"
+    
+    # 记录执行结果
+    logger.info(report)
+    
+    # 如果 stats 为空或缺少total_tasks字段，创建一个完整的状态信息
+    if not stats or 'total_tasks' not in stats:
+        stats = {
+            "exec_date": exec_date,
+            "total_tasks": 0,
+            "type_counts": {},
+            "success_count": 0,
+            "fail_count": 0,
+            "pending_count": 0,
+            "success_rate": 0,
+            "avg_duration": None,
+            "min_duration": None,
+            "max_duration": None,
+            "failed_tasks": [],
+            "success": success,
+            "dag_id": dag_id,
+            "dag_run_state": state
+        }
+    else:
         # 添加success状态到stats
         stats["success"] = success
-        
-        # 将结果推送到XCom
-        task_instance.xcom_push(key='execution_stats', value=json.dumps(stats, cls=DecimalEncoder))
-        task_instance.xcom_push(key='execution_report', value=report)
-        task_instance.xcom_push(key='execution_success', value=success)
-        
-        # 生成简化的执行报告
-        simple_report = generate_execution_report(exec_date, stats)
-        
-        return simple_report
-    except Exception as e:
-        logger.error(f"汇总执行情况时出现未处理的错误: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        # 返回一个简单的错误报告
-        return f"执行汇总时出现错误: {str(e)}"
+    
+    # 将结果推送到XCom
+    task_instance.xcom_push(key='execution_stats', value=stats)
+    task_instance.xcom_push(key='execution_report', value=report)
+    task_instance.xcom_push(key='execution_success', value=success)
+    
+    # 生成简化的执行报告
+    simple_report = generate_execution_report(exec_date, stats)
+    
+    return simple_report
 
 # 添加新函数，用于从数据库获取执行计划
 def get_execution_plan_from_db(ds):
@@ -1008,6 +1006,15 @@ def get_execution_plan_from_db(ds):
     返回:
         dict: 执行计划字典，如果找不到则返回None
     """
+    # 记录输入参数详细信息
+    if isinstance(ds, datetime):
+        if ds.tzinfo:
+            logger.debug(f"【执行日期】get_execution_plan_from_db接收到datetime对象: {ds}, 带时区: {ds.tzinfo}")
+        else:
+            logger.debug(f"【执行日期】get_execution_plan_from_db接收到datetime对象: {ds}, 无时区")
+    else:
+        logger.debug(f"【执行日期】get_execution_plan_from_db接收到: {ds}, 类型: {type(ds)}")
+    
     logger.info(f"尝试从数据库获取执行日期 {ds} 的执行计划")
     conn = get_pg_conn()
     cursor = conn.cursor()
@@ -1095,6 +1102,12 @@ with DAG(
     }
 ) as dag:
     
+    # 记录DAG实例化时的重要信息
+    now = datetime.now()
+    now_with_tz = now.replace(tzinfo=pytz.timezone('Asia/Shanghai'))
+    default_exec_date = get_today_date()
+    logger.info(f"【DAG初始化】当前时间: {now} / {now_with_tz}, 默认执行日期: {default_exec_date}")
+    
     #############################################
     # 阶段1: 准备阶段(Prepare Phase)
     #############################################
@@ -1113,8 +1126,8 @@ with DAG(
         
         # 验证执行计划有效性
         check_plan = ShortCircuitOperator(
-            task_id="check_execution_plan_file",
-            python_callable=check_execution_plan_file,
+            task_id="check_execution_plan",
+            python_callable=check_execution_plan,
             provide_context=True
         )
         
@@ -1178,6 +1191,12 @@ with DAG(
         # 获取当前DAG的执行日期
         exec_date = get_today_date()  # 使用当天日期作为默认值
         logger.info(f"当前DAG执行日期 ds={exec_date}，尝试从数据库获取执行计划")
+        
+        # 记录实际使用的执行日期的时区信息和原始格式
+        if isinstance(exec_date, datetime):
+            logger.info(f"【执行日期详情】类型: datetime, 时区: {exec_date.tzinfo}, 值: {exec_date}")
+        else:
+            logger.info(f"【执行日期详情】类型: {type(exec_date)}, 值: {exec_date}")
         
         # 从数据库获取执行计划
         execution_plan = get_execution_plan_from_db(exec_date)

@@ -16,7 +16,7 @@ from common import (
     get_neo4j_driver,
     get_today_date
 )
-from config import PG_CONFIG, NEO4J_CONFIG, EXECUTION_PLAN_KEEP_COUNT
+from config import PG_CONFIG, NEO4J_CONFIG
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -282,91 +282,32 @@ def get_subscription_state_hash():
         cursor.close()
         conn.close()
 
-def has_any_execution_plans():
+def check_execution_plan_in_db(exec_date):
     """
-    检查当前目录下是否存在任何执行计划文件
-    
-    返回:
-        bool: 如果存在任何执行计划文件返回True，否则返回False
-    """
-    dag_dir = os.path.dirname(__file__)
-    for file in os.listdir(dag_dir):
-        if file.startswith('exec_plan_') and file.endswith('.json'):
-            logger.info(f"找到现有执行计划文件: {file}")
-            return True
-    
-    logger.info("未找到任何执行计划文件")
-    return False
-
-def get_execution_plan_files():
-    """
-    获取所有执行计划文件，按日期排序
-    
-    返回:
-        list: 排序后的执行计划文件列表，格式为[(日期, json文件路径, ready文件路径)]
-    """
-    dag_dir = os.path.dirname(__file__)
-    plan_files = []
-    
-    # 查找所有执行计划文件
-    for file in os.listdir(dag_dir):
-        match = re.match(r'exec_plan_(\d{4}-\d{2}-\d{2})\.json', file)
-        if match:
-            date_str = match.group(1)
-            json_path = os.path.join(dag_dir, file)
-            ready_path = os.path.join(dag_dir, f"exec_plan_{date_str}.ready")
-            
-            if os.path.exists(ready_path):
-                plan_files.append((date_str, json_path, ready_path))
-    
-    # 按日期排序（从旧到新）
-    plan_files.sort(key=lambda x: x[0])
-    
-    return plan_files
-
-def cleanup_old_execution_plans(keep_count=None):
-    """
-    清理过期的执行计划文件，保留最新的指定数量
+    检查数据库中是否已存在指定日期的执行计划
     
     参数:
-        keep_days (int): 要保留的文件天数，如果为None则使用配置
-    
+        exec_date (str): 执行日期，格式为YYYY-MM-DD
+        
     返回:
-        int: 删除的文件数量
+        bool: 如果存在返回True，否则返回False
     """
-    if keep_count is None:
-        keep_count = EXECUTION_PLAN_KEEP_COUNT
-    
-    # 获取所有执行计划文件
-    plan_files = get_execution_plan_files()
-    logger.info(f"找到 {len(plan_files)} 个执行计划文件，将保留最新的 {keep_count} 个")
-    
-    # 如果文件数量未超过保留数，不需要删除
-    if len(plan_files) <= keep_count:
-        logger.info(f"执行计划文件数量 ({len(plan_files)}) 未超过保留数量 ({keep_count})，无需清理")
-        return 0
-    
-    # 删除最旧的文件
-    files_to_delete = plan_files[:-keep_count]
-    deleted_count = 0
-    
-    for _, json_path, ready_path in files_to_delete:
-        try:
-            # 删除JSON文件
-            if os.path.exists(json_path):
-                os.remove(json_path)
-                deleted_count += 1
-                logger.info(f"已删除过期执行计划文件: {json_path}")
-            
-            # 删除ready文件
-            if os.path.exists(ready_path):
-                os.remove(ready_path)
-                deleted_count += 1
-                logger.info(f"已删除过期ready文件: {ready_path}")
-        except Exception as e:
-            logger.error(f"删除文件时出错: {str(e)}")
-    
-    return deleted_count
+    conn = get_pg_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM airflow_exec_plans
+            WHERE ds = %s
+        """, (exec_date,))
+        count = cursor.fetchone()[0]
+        return count > 0
+    except Exception as e:
+        logger.error(f"检查数据库中执行计划时出错: {str(e)}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
 
 def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
     """
@@ -420,21 +361,16 @@ def prepare_pipeline_dag_schedule(**kwargs):
     exec_date = kwargs.get('ds') or get_today_date()
     logger.info(f"开始准备执行日期 {exec_date} 的Pipeline调度任务")
     
-    # 定义执行计划文件路径 - 使用新的基于日期的命名
-    plan_base_path = os.path.join(os.path.dirname(__file__), f'exec_plan_{exec_date}')
-    plan_path = f"{plan_base_path}.json"
-    ready_path = f"{plan_base_path}.ready"
-    
-    # 检查是否需要创建新的执行计划文件
+    # 检查是否需要创建新的执行计划
     need_create_plan = False
     
-    # 新的条件1: 当前目录下没有任何json文件
-    has_any_plans = has_any_execution_plans()
-    if not has_any_plans:
-        logger.info("当前目录下没有任何执行计划文件，需要创建新的执行计划")
+    # 条件1: 数据库中不存在当天的执行计划
+    has_plan_in_db = check_execution_plan_in_db(exec_date)
+    if not has_plan_in_db:
+        logger.info(f"数据库中不存在执行日期 {exec_date} 的执行计划，需要创建新的执行计划")
         need_create_plan = True
     
-    # 新的条件2: schedule_status表中的数据发生了变更
+    # 条件2: schedule_status表中的数据发生了变更
     if not need_create_plan:
         # 计算当前哈希值
         current_hash = get_subscription_state_hash()
@@ -460,7 +396,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
     
     # 如果不需要创建新的执行计划，直接返回
     if not need_create_plan:
-        logger.info("无需创建新的执行计划文件")
+        logger.info("无需创建新的执行计划")
         return 0
     
     # 继续处理，创建新的执行计划
@@ -489,7 +425,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
     valid_tables = filter_invalid_tables(enriched_tables)
     logger.info(f"过滤无效表后，最终有 {len(valid_tables)} 个有效表")
     
-    # 保存最新执行计划，供DAG读取使用
+    # 构建执行计划并保存到数据库
     try:
         # 构建执行计划
         resource_tasks = []
@@ -551,148 +487,119 @@ def prepare_pipeline_dag_schedule(**kwargs):
             "dependencies": dependencies
         }
         
-        # 创建临时文件
-        temp_plan_path = f"{plan_path}.temp"
+        # 更新订阅表状态哈希值
+        current_hash = get_subscription_state_hash()
+        hash_file = os.path.join(os.path.dirname(__file__), '.subscription_state')
+        with open(hash_file, 'w') as f:
+            f.write(current_hash)
+        logger.info(f"已更新订阅表状态哈希值: {current_hash}")
         
+        # 触发数据调度器DAG重新解析
+        touch_data_scheduler_file()
+        
+        # 保存执行计划到数据库表
         try:
-            # 写入临时文件
-            with open(temp_plan_path, 'w') as f:
-                json.dump(execution_plan, f, indent=2)
-            logger.info(f"已保存执行计划到临时文件: {temp_plan_path}")
+            # 获取DAG运行信息
+            dag_run = kwargs.get('dag_run')
+            if dag_run:
+                dag_id = dag_run.dag_id
+                run_id = dag_run.run_id
+                logical_date = dag_run.logical_date
+            else:
+                # 如果无法获取dag_run，使用默认值
+                dag_id = kwargs.get('dag').dag_id if 'dag' in kwargs else "dag_dataops_pipeline_prepare_scheduler"
+                run_id = f"manual_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                logical_date = datetime.now()
             
-            # 原子替换正式文件
-            os.replace(temp_plan_path, plan_path)
-            logger.info(f"已替换执行计划文件: {plan_path}")
+            # 保存到数据库
+            save_result = save_execution_plan_to_db(
+                execution_plan=execution_plan,
+                dag_id=dag_id,
+                run_id=run_id,
+                logical_date=logical_date,
+                ds=exec_date
+            )
             
-            # 创建ready文件，标记执行计划就绪，包含详细时间信息
-            now = datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-            with open(ready_path, 'w') as f:
-                f.write(f"Created at: {timestamp}\nFor date: {exec_date}")
-            logger.info(f"已创建ready标记文件: {ready_path}")
+            if save_result:
+                logger.info("执行计划已成功保存到数据库")
+            else:
+                raise Exception("执行计划保存到数据库失败")
             
-            # 更新订阅表状态哈希值
-            current_hash = get_subscription_state_hash()
-            hash_file = os.path.join(os.path.dirname(__file__), '.subscription_state')
-            with open(hash_file, 'w') as f:
-                f.write(current_hash)
-            logger.info(f"已更新订阅表状态哈希值: {current_hash}")
-            
-            # 清理过期的执行计划文件
-            deleted_count = cleanup_old_execution_plans()
-            logger.info(f"清理了 {deleted_count} 个过期执行计划文件")
-            
-            # dag_dataops_pipeline_data_scheduler.py文件的修改日期更新
-            touch_data_scheduler_file()
-            
-            # 保存执行计划到数据库表
-            try:
-                # 获取DAG运行信息
-                dag_run = kwargs.get('dag_run')
-                if dag_run:
-                    dag_id = dag_run.dag_id
-                    run_id = dag_run.run_id
-                    logical_date = dag_run.logical_date
-                else:
-                    # 如果无法获取dag_run，使用默认值
-                    dag_id = kwargs.get('dag').dag_id if 'dag' in kwargs else "dag_dataops_pipeline_prepare_scheduler"
-                    run_id = f"manual_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    logical_date = datetime.now()
-                
-                # 保存到数据库
-                save_result = save_execution_plan_to_db(
-                    execution_plan=execution_plan,
-                    dag_id=dag_id,
-                    run_id=run_id,
-                    logical_date=logical_date,
-                    ds=exec_date
-                )
-                
-                if save_result:
-                    logger.info("执行计划已成功保存到数据库")
-                else:
-                    logger.warning("执行计划保存到数据库失败，但文件已保存成功")
-            except Exception as db_e:
-                # 捕获数据库保存错误，但不影响主流程
-                logger.error(f"保存执行计划到数据库时出错: {str(db_e)}")
-                logger.info("继续执行，因为文件已成功保存")
-            
-        except Exception as e:
-            logger.error(f"保存执行计划文件或触发DAG重新解析时出错: {str(e)}")
-            # 出错时清理临时文件
-            if os.path.exists(temp_plan_path):
-                try:
-                    os.remove(temp_plan_path)
-                    logger.info(f"已清理临时文件: {temp_plan_path}")
-                except Exception as rm_e:
-                    logger.error(f"清理临时文件时出错: {str(rm_e)}")
-            raise  # 重新抛出异常，确保任务失败
+        except Exception as db_e:
+            # 捕获数据库保存错误
+            error_msg = f"保存执行计划到数据库时出错: {str(db_e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
                 
     except Exception as e:
-        error_msg = f"保存或验证执行计划文件时出错: {str(e)}"
+        error_msg = f"创建或保存执行计划时出错: {str(e)}"
         logger.error(error_msg)
         # 强制抛出异常，确保任务失败，阻止下游DAG执行
         raise Exception(error_msg)
     
-    return len(valid_tables)  # 返回有效表数量代替插入记录数
+    return len(valid_tables)  # 返回有效表数量
 
-def check_execution_plan_file(**kwargs):
+def check_execution_plan_db(**kwargs):
     """
-    检查当天的执行计划文件是否存在且有效
+    检查当天的执行计划是否存在于数据库中
     返回False将阻止所有下游任务执行
     """
     # 获取执行日期
     exec_date = kwargs.get('ds') or get_today_date()
-    logger.info(f"检查执行日期 {exec_date} 的执行计划文件是否存在且有效")
+    logger.info(f"检查执行日期 {exec_date} 的执行计划是否存在于数据库中")
     
-    # 定义执行计划文件路径
-    plan_path = os.path.join(os.path.dirname(__file__), f'exec_plan_{exec_date}.json')
-    ready_path = os.path.join(os.path.dirname(__file__), f'exec_plan_{exec_date}.ready')
-    
-    # 检查文件是否存在
-    if not os.path.exists(plan_path):
-        logger.error(f"执行计划文件不存在: {plan_path}")
-        return False
-    
-    # 检查ready标记是否存在
-    if not os.path.exists(ready_path):
-        logger.error(f"执行计划ready标记文件不存在: {ready_path}")
-        return False
-    
-    # 检查文件是否可读且内容有效
+    # 检查数据库中是否存在执行计划
+    conn = get_pg_conn()
+    cursor = conn.cursor()
     try:
-        with open(plan_path, 'r') as f:
-            data = json.load(f)
+        cursor.execute("""
+            SELECT plan
+            FROM airflow_exec_plans
+            WHERE ds = %s
+            ORDER BY logical_date DESC
+            LIMIT 1
+        """, (exec_date,))
+        
+        result = cursor.fetchone()
+        if not result:
+            logger.error(f"数据库中不存在执行日期 {exec_date} 的执行计划")
+            return False
+        
+        # 检查执行计划内容是否有效
+        try:
+            # PostgreSQL的jsonb类型会被psycopg2自动转换为Python字典，无需再使用json.loads
+            plan_data = result[0]
             
             # 检查必要字段
-            if "exec_date" not in data:
+            if "exec_date" not in plan_data:
                 logger.error("执行计划缺少exec_date字段")
                 return False
                 
-            if not isinstance(data.get("resource_tasks", []), list):
+            if not isinstance(plan_data.get("resource_tasks", []), list):
                 logger.error("执行计划的resource_tasks字段无效")
                 return False
                 
-            if not isinstance(data.get("model_tasks", []), list):
+            if not isinstance(plan_data.get("model_tasks", []), list):
                 logger.error("执行计划的model_tasks字段无效")
                 return False
             
             # 检查是否有任务数据
-            resource_tasks = data.get("resource_tasks", [])
-            model_tasks = data.get("model_tasks", [])
-            if not resource_tasks and not model_tasks:
-                logger.warning("执行计划不包含任何任务，但文件格式有效")
-                # 注意：即使没有任务，我们仍然允许流程继续
+            resource_tasks = plan_data.get("resource_tasks", [])
+            model_tasks = plan_data.get("model_tasks", [])
             
-            logger.info(f"执行计划文件验证成功: 包含 {len(resource_tasks)} 个资源任务和 {len(model_tasks)} 个模型任务")
+            logger.info(f"执行计划验证成功: 包含 {len(resource_tasks)} 个资源任务和 {len(model_tasks)} 个模型任务")
             return True
             
-    except json.JSONDecodeError as je:
-        logger.error(f"执行计划文件不是有效的JSON: {str(je)}")
-        return False
+        except Exception as je:
+            logger.error(f"处理执行计划数据时出错: {str(je)}")
+            return False
+        
     except Exception as e:
-        logger.error(f"检查执行计划文件时出错: {str(e)}")
+        logger.error(f"检查数据库中执行计划时出错: {str(e)}")
         return False
+    finally:
+        cursor.close()
+        conn.close()
 
 # 创建DAG
 with DAG(
@@ -728,10 +635,10 @@ with DAG(
         dag=dag
     )
     
-    # 检查执行计划文件
-    check_plan_file = ShortCircuitOperator(
-        task_id="check_execution_plan_file",
-        python_callable=check_execution_plan_file,
+    # 检查执行计划是否存在于数据库中
+    check_plan_in_db = ShortCircuitOperator(
+        task_id="check_execution_plan_in_db",
+        python_callable=check_execution_plan_db,
         provide_context=True,
         dag=dag
     )
@@ -743,4 +650,4 @@ with DAG(
     )
     
     # 设置任务依赖
-    start_preparation >> prepare_task >> check_plan_file >> preparation_completed
+    start_preparation >> prepare_task >> check_plan_in_db >> preparation_completed
