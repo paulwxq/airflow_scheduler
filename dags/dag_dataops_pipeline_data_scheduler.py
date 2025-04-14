@@ -1622,8 +1622,7 @@ with DAG(
                         for table_name in terminal_tasks:
                             if table_name in task_dict:
                                 task_dict[table_name] >> processing_completed
-                                logger.info(f"设置终端任务: {table_name} >> processing_completed")
-            
+                                logger.info(f"设置终端任务: {table_name} >> processing_completed")            
             except Exception as plan_e:
                 logger.error(f"解析执行计划文件时出错: {str(plan_e)}")
                 import traceback
