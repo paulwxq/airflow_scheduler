@@ -37,3 +37,5 @@ SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"
 # 本地开发环境脚本路径（如果需要区分环境）
 # LOCAL_SCRIPTS_BASE_PATH = "/path/to/local/scripts"
 
+# 执行计划保留的数量
+EXECUTION_PLAN_KEEP_COUNT = 5
