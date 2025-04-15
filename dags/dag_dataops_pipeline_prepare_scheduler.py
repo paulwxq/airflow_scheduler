@@ -11,6 +11,7 @@ import re
 import glob
 from pathlib import Path
 import hashlib
+import pendulum
 from common import (
     get_pg_conn, 
     get_neo4j_driver,
@@ -358,7 +359,10 @@ def prepare_pipeline_dag_schedule(**kwargs):
         logger.info(f"接收到强制刷新参数: FORCE_REFRESH={is_force_refresh}")
     
     # 获取执行日期
-    exec_date = kwargs.get('ds') or get_today_date()
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
     logger.info(f"开始准备执行日期 {exec_date} 的Pipeline调度任务")
     
     # 检查是否需要创建新的执行计划
@@ -367,7 +371,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
     # 条件1: 数据库中不存在当天的执行计划
     has_plan_in_db = check_execution_plan_in_db(exec_date)
     if not has_plan_in_db:
-        logger.info(f"数据库中不存在执行日期 {exec_date} 的执行计划，需要创建新的执行计划")
+        logger.info(f"数据库中不存在执行日期exec_date {exec_date} 的执行计划，需要创建新的执行计划")
         need_create_plan = True
     
     # 条件2: schedule_status表中的数据发生了变更
@@ -505,6 +509,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
                 dag_id = dag_run.dag_id
                 run_id = dag_run.run_id
                 logical_date = dag_run.logical_date
+                local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
             else:
                 # 如果无法获取dag_run，使用默认值
                 dag_id = kwargs.get('dag').dag_id if 'dag' in kwargs else "dag_dataops_pipeline_prepare_scheduler"
@@ -516,7 +521,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
                 execution_plan=execution_plan,
                 dag_id=dag_id,
                 run_id=run_id,
-                logical_date=logical_date,
+                logical_date=local_logical_date,
                 ds=exec_date
             )
             
@@ -545,8 +550,14 @@ def check_execution_plan_db(**kwargs):
     返回False将阻止所有下游任务执行
     """
     # 获取执行日期
-    exec_date = kwargs.get('ds') or get_today_date()
-    logger.info(f"检查执行日期 {exec_date} 的执行计划是否存在于数据库中")
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
+    logger.info(f"logical_date： {logical_date} ")
+    logger.info(f"local_logical_date {local_logical_date} ")
+    logger.info(f"检查执行日期 exec_date {exec_date} 的执行计划是否存在于数据库中")
+   
     
     # 检查数据库中是否存在执行计划
     conn = get_pg_conn()
@@ -568,8 +579,7 @@ def check_execution_plan_db(**kwargs):
         # 检查执行计划内容是否有效
         try:
             # PostgreSQL的jsonb类型会被psycopg2自动转换为Python字典，无需再使用json.loads
-            plan_data = result[0]
-            
+            plan_data = result[0]            
             # 检查必要字段
             if "exec_date" not in plan_data:
                 logger.error("执行计划缺少exec_date字段")

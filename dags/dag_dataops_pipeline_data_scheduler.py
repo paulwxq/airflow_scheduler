@@ -16,6 +16,7 @@ import logging
 import networkx as nx
 import json
 import os
+import pendulum
 from decimal import Decimal
 from common import (
     get_pg_conn, 
@@ -436,11 +437,13 @@ def filter_invalid_tables(tables_info):
 
 def prepare_dag_schedule(**kwargs):
     """准备DAG调度任务的主函数"""
-    exec_date = kwargs.get('ds') or get_today_date()
-    execution_date = kwargs.get('execution_date')
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
     
     # 记录重要的时间参数
-    logger.info(f"【时间参数】prepare_dag_schedule: ds={exec_date}, execution_date={execution_date}")
+    logger.info(f"【时间参数】prepare_dag_schedule: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info(f"开始准备执行日期 {exec_date} 的统一调度任务")
     
     # 1. 获取启用的表
@@ -543,11 +546,13 @@ def check_execution_plan(**kwargs):
     检查执行计划是否存在且有效
     返回False将阻止所有下游任务执行
     """
-    execution_date = kwargs.get('execution_date')
-    exec_date = kwargs.get('ds') or get_today_date()
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
     
     # 记录重要的时间参数
-    logger.info(f"【时间参数】check_execution_plan: ds={exec_date}, execution_date={execution_date}")
+    logger.info(f"【时间参数】check_execution_plan: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info("检查数据库中的执行计划是否存在且有效")
     
     # 从数据库获取执行计划
@@ -643,11 +648,13 @@ def get_table_dependencies(table_names):
 def create_execution_plan(**kwargs):
     """准备执行计划的函数，使用从准备阶段传递的数据"""
     try:
-        execution_date = kwargs.get('execution_date')
-        exec_date = kwargs.get('ds') or get_today_date()
+        dag_run = kwargs.get('dag_run')
+        logical_date = dag_run.logical_date
+        local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+        exec_date = local_logical_date.strftime('%Y-%m-%d')
         
         # 记录重要的时间参数
-        logger.info(f"【时间参数】create_execution_plan: ds={exec_date}, execution_date={execution_date}")
+        logger.info(f"【时间参数】create_execution_plan: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
         
         # 从XCom获取执行计划
         execution_plan = kwargs['ti'].xcom_pull(task_ids='prepare_phase.prepare_dag_schedule', key='execution_plan')
@@ -807,7 +814,7 @@ def get_execution_stats(exec_date):
             }
         
         dag_run = dag_runs[0]
-        logger.debug(f"找到最近的DAG运行: execution_date={dag_run.execution_date}, updated_at={dag_run.updated_at}, state={dag_run.state}")
+        logger.debug(f"找到最近的DAG运行: logical_date={dag_run.logical_date}, updated_at={dag_run.updated_at}, state={dag_run.state}")
         
         # 直接查询最近更新的任务实例，不再通过execution_date过滤
         # 只通过dag_id过滤，按更新时间降序排序
@@ -864,7 +871,7 @@ def get_execution_stats(exec_date):
         # 汇总统计信息
         stats = {
             "exec_date": exec_date,
-            "dag_run_execution_date": dag_run.execution_date,
+            "dag_run_logical_date": dag_run.logical_date,
             "dag_run_updated_at": dag_run.updated_at,
             "total_tasks": total_tasks,
             "type_counts": type_counts,
@@ -904,11 +911,13 @@ def generate_execution_report(exec_date, stats):
 
 def summarize_execution(**kwargs):
     """简化的汇总执行情况函数，只判断整个作业是否成功"""
-    exec_date = kwargs.get('ds') or get_today_date()
-    execution_date = kwargs.get('execution_date')
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
     
-    # 记录重要的时间参数，仅供参考
-    logger.debug(f"【时间参数】summarize_execution: ds={exec_date}, execution_date={execution_date}")
+    # 记录重要的时间参数
+    logger.debug(f"【时间参数】summarize_execution: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.debug(f"开始汇总执行日期 {exec_date} 的执行情况")
     
     # 获取任务实例对象
@@ -939,7 +948,7 @@ def summarize_execution(**kwargs):
         # 获取状态
         dag_run = dag_runs[0]  # 取最近更新的DAG运行
         state = dag_run.state
-        logger.debug(f"找到最近的DAG运行: execution_date={dag_run.execution_date}, updated_at={dag_run.updated_at}, state={state}")
+        logger.debug(f"找到最近的DAG运行: logical_date={dag_run.logical_date}, updated_at={dag_run.updated_at}, state={state}")
         logger.debug(f"DAG {dag_id} 的状态为: {state}")
         
         # 判断是否成功
