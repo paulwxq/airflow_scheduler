@@ -182,7 +182,12 @@ def execute_python_script(target_table, script_name, script_exec_mode, exec_date
         # 检查并调用标准入口函数run
         if hasattr(module, "run"):
             logger.info(f"调用脚本 {script_name} 的标准入口函数 run()")
-            result = module.run(table_name=target_table, execution_mode=script_exec_mode)
+            result = module.run(
+                table_name=target_table, 
+                execution_mode=script_exec_mode,
+                exec_date=exec_date,
+                script_name=script_name
+            )
             logger.info(f"脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
             
             # 确保result是布尔值
@@ -442,6 +447,11 @@ def prepare_dag_schedule(**kwargs):
     local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     
+    # 检查是否是手动触发
+    is_manual_trigger = dag_run.conf.get('MANUAL_TRIGGER', False) if dag_run.conf else False
+    if is_manual_trigger:
+        logger.info(f"【手动触发】当前DAG是手动触发的，使用传入的logical_date: {logical_date}")
+    
     # 记录重要的时间参数
     logger.info(f"【时间参数】prepare_dag_schedule: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info(f"开始准备执行日期 {exec_date} 的统一调度任务")
@@ -553,6 +563,11 @@ def check_execution_plan(**kwargs):
     local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     
+    # 检查是否是手动触发
+    is_manual_trigger = dag_run.conf.get('MANUAL_TRIGGER', False) if dag_run.conf else False
+    if is_manual_trigger:
+        logger.info(f"【手动触发】当前DAG是手动触发的，使用传入的logical_date: {logical_date}")
+    
     # 记录重要的时间参数
     logger.info(f"【时间参数】check_execution_plan: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info("检查数据库中的执行计划是否存在且有效")
@@ -654,6 +669,11 @@ def create_execution_plan(**kwargs):
         logical_date = dag_run.logical_date
         local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
         exec_date = local_logical_date.strftime('%Y-%m-%d')
+        
+        # 检查是否是手动触发
+        is_manual_trigger = dag_run.conf.get('MANUAL_TRIGGER', False) if dag_run.conf else False
+        if is_manual_trigger:
+            logger.info(f"【手动触发】当前DAG是手动触发的，使用传入的logical_date: {logical_date}")
         
         # 记录重要的时间参数
         logger.info(f"【时间参数】create_execution_plan: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
@@ -868,11 +888,14 @@ with DAG(
         'retries': 1,
         'retry_delay': timedelta(minutes=5)
     },
-    # 添加DAG级别参数，确保任务运行时有正确的环境
     params={
-        "scripts_path": SCRIPTS_BASE_PATH,
-        "airflow_base_path": os.path.dirname(os.path.dirname(__file__))
-    }
+        'MANUAL_TRIGGER': True, 
+    },
+    # 添加DAG级别参数，确保任务运行时有正确的环境
+    # params={
+    #     "scripts_path": SCRIPTS_BASE_PATH,
+    #     "airflow_base_path": os.path.dirname(os.path.dirname(__file__))
+    # }
 ) as dag:
     
     # 记录DAG实例化时的重要信息

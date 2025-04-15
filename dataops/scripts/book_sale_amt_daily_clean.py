@@ -19,10 +19,19 @@ logging.basicConfig(
 
 logger = logging.getLogger("book_sale_amt_daily_clean")
 
-def clean_daily_book_sales():
+def clean_daily_book_sales(table_name=None, exec_date=None, execution_mode=None, script_name=None):
     """清洗日度图书销售额数据的函数"""
-    # 获取当前脚本的文件名
-    script_name = os.path.basename(__file__)
+    # 获取当前脚本的文件名（如果没有传入）
+    if script_name is None:
+        script_name = os.path.basename(__file__)
+    
+    # 打印所有传入的参数
+    logger.info(f"===== 传入参数信息 (处理函数内) =====")
+    logger.info(f"table_name: {table_name}")
+    logger.info(f"exec_date: {exec_date}")
+    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"script_name: {script_name}")
+    logger.info(f"======================================")
     
     logger.info(f"开始执行日度图书销售额数据清洗 - 脚本: {script_name}")
     
@@ -33,10 +42,30 @@ def clean_daily_book_sales():
         
         logger.info("执行数据清洗流程...")
         
-        # 模拟处理步骤
-        today = datetime.now()
-        yesterday = today - timedelta(days=1)
-        date_str = yesterday.strftime('%Y-%m-%d')
+        # 尝试使用传入的日期，如果没有则使用昨天
+        if exec_date:
+            if isinstance(exec_date, str):
+                try:
+                    date_obj = datetime.strptime(exec_date, '%Y-%m-%d')
+                    date_str = exec_date
+                except ValueError:
+                    today = datetime.now()
+                    yesterday = today - timedelta(days=1)
+                    date_str = yesterday.strftime('%Y-%m-%d')
+                    logger.warning(f"无法解析传入的exec_date: {exec_date}，使用昨天日期: {date_str}")
+            else:
+                try:
+                    date_str = exec_date.strftime('%Y-%m-%d')
+                except:
+                    today = datetime.now()
+                    yesterday = today - timedelta(days=1)
+                    date_str = yesterday.strftime('%Y-%m-%d')
+                    logger.warning(f"无法格式化传入的exec_date，使用昨天日期: {date_str}")
+        else:
+            today = datetime.now()
+            yesterday = today - timedelta(days=1)
+            date_str = yesterday.strftime('%Y-%m-%d')
+            logger.info(f"未传入exec_date，使用昨天日期: {date_str}")
         
         logger.info(f"正在清洗 {date_str} 的数据")
         
@@ -65,34 +94,46 @@ def clean_daily_book_sales():
         # 模拟写入数据库
         success_rate = random.random()
         if success_rate > 0.1:  # 90%的成功率
-            logger.info(f"表 {date_str} 数据清洗成功，已处理并写入")
+            logger.info(f"表 {table_name} 数据清洗成功，处理日期: {date_str}")
             return True
         else:
-            logger.error(f"表 {date_str} 数据清洗或写入过程中出现随机错误")
+            logger.error(f"表 {table_name} 数据清洗或写入过程中出现随机错误")
             return False
     except Exception as e:
         logger.error(f"清洗日度图书销售额数据时出错: {str(e)}")
         return False
 
-def run(table_name, execution_mode, **kwargs):
+def run(table_name, execution_mode, exec_date=None, script_name=None, **kwargs):
     """
     统一入口函数，符合Airflow动态脚本调用规范
     
     参数:
         table_name (str): 要处理的表名
         execution_mode (str): 执行模式 (append/full_refresh)
+        exec_date: 执行日期
+        script_name: 脚本名称
         **kwargs: 其他可能的参数
     
     返回:
         bool: 执行成功返回True，否则返回False
     """
-    logger.info(f"通过统一入口函数run()调用 - 处理表: {table_name}, 模式: {execution_mode}")
+    # 打印所有传入的参数
+    logger.info(f"===== 传入参数信息 (入口函数内) =====")
+    logger.info(f"table_name: {table_name}")
+    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"exec_date: {exec_date}")
+    logger.info(f"script_name: {script_name}")
     
-    # 获取当前脚本的文件名
-    script_name = os.path.basename(__file__)
+    # 打印所有可能的额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}")
+    logger.info(f"======================================")
+    
+    # 如果没有提供脚本名，使用当前脚本的文件名
+    if script_name is None:
+        script_name = os.path.basename(__file__)
     
     # 记录详细的执行信息
-    logger.info(f"[统一入口] 脚本 {script_name} 正在处理表 {table_name}, 模式: {execution_mode}")
     logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # 根据执行模式判断处理逻辑
@@ -103,7 +144,12 @@ def run(table_name, execution_mode, **kwargs):
         logger.info("执行增量模式 - 只清洗最新一天的数据")
     
     # 调用实际处理函数
-    result = clean_daily_book_sales()
+    result = clean_daily_book_sales(
+        table_name=table_name, 
+        exec_date=exec_date,
+        execution_mode=execution_mode, 
+        script_name=script_name
+    )
     
     logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"处理结果: {'成功' if result else '失败'}")
@@ -111,5 +157,10 @@ def run(table_name, execution_mode, **kwargs):
     return result
 
 if __name__ == "__main__":
-    # 直接执行时调用统一入口函数
-    run(table_name="book_sale_amt_daily", execution_mode="append") 
+    # 直接执行时调用统一入口函数，带上所有参数作为测试
+    run(
+        table_name="book_sale_amt_daily", 
+        execution_mode="append",
+        exec_date=datetime.now().strftime('%Y-%m-%d'),
+        script_name=os.path.basename(__file__)
+    ) 

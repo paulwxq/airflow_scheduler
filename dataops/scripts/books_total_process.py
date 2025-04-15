@@ -4,6 +4,7 @@
 import logging
 import sys
 import os
+from datetime import datetime
 
 # 配置日志记录器
 logging.basicConfig(
@@ -16,39 +17,75 @@ logging.basicConfig(
 
 logger = logging.getLogger("book_total_process")
 
-def process_book_data():
+def process_book_data(table_name=None, execution_date=None, execution_mode=None, script_name=None):
     """处理图书数据的示例函数"""
-    # 获取当前脚本的文件名
-    script_name = os.path.basename(__file__)
-       
-    # 使用logger.info输出脚本名称
-    logger.info(f"当前脚本名称是 {script_name} - 来自logger.info输出")
+    # 获取当前脚本的文件名（如果没有传入）
+    if script_name is None:
+        script_name = os.path.basename(__file__)
+    
+    # 使用print输出所有参数
+    print(f"===== 参数信息 (print输出) =====")
+    print(f"table_name: {table_name}")
+    print(f"exec_date: {execution_date}")
+    print(f"execution_mode: {execution_mode}")
+    print(f"script_name: {script_name}")
+    print(f"================================")
+    
+    # 使用logger.info输出所有参数
+    logger.info(f"===== 参数信息 (logger输出) =====")
+    logger.info(f"table_name: {table_name}")
+    logger.info(f"exec_date: {execution_date}")
+    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"script_name: {script_name}")
+    logger.info(f"================================")
     
     return True
 
-def run(table_name, execution_mode, **kwargs):
+def run(table_name, execution_mode, exec_date=None, script_name=None, **kwargs):
     """
     统一入口函数，符合Airflow动态脚本调用规范
     
     参数:
         table_name (str): 要处理的表名
         execution_mode (str): 执行模式 (append/full_refresh)
+        exec_date: 执行日期
+        script_name: 脚本名称
         **kwargs: 其他可能的参数
     
     返回:
         bool: 执行成功返回True，否则返回False
     """
-    logger.info(f"通过统一入口函数run()调用 - 处理表: {table_name}, 模式: {execution_mode}")
+    logger.info(f"开始执行脚本...")
     
-    # 获取当前脚本的文件名
-    script_name = os.path.basename(__file__)
+    # 打印所有传入的参数
+    logger.info(f"===== 传入参数信息 =====")
+    logger.info(f"table_name: {table_name}")
+    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"exec_date: {exec_date}")
+    logger.info(f"script_name: {script_name}")
     
-    # 同时使用print和logger输出以便比较
-    logger.info(f"[统一入口] 脚本 {script_name} 正在处理表 {table_name}, 模式: {execution_mode}")
+    # 打印所有可能的额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}")
+    logger.info(f"========================")
+    
+    # 如果没有传入script_name，使用当前脚本名
+    if script_name is None:
+        script_name = os.path.basename(__file__)
     
     # 实际调用内部处理函数
-    return process_book_data()
+    return process_book_data(
+        table_name=table_name,
+        execution_date=exec_date,
+        execution_mode=execution_mode,
+        script_name=script_name
+    )
 
 if __name__ == "__main__":
-    # 直接执行时调用统一入口函数
-    run(table_name="books", execution_mode="full_refresh")
+    # 直接执行时调用统一入口函数，传入测试参数
+    run(
+        table_name="books", 
+        execution_mode="full_refresh",
+        exec_date=datetime.now(),
+        script_name=os.path.basename(__file__)
+    )

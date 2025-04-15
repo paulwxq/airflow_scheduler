@@ -358,7 +358,7 @@ with DAG(
         external_task_id="data_processing_phase.processing_completed",
         mode="reschedule",  # 使用 reschedule 模式，不会占用 worker
         timeout=7200,  # 等待超时时间为 2 小时
-        poke_interval=30,  # 每15秒检查一次
+        poke_interval=30,  # 每30秒检查一次
         allowed_states=["success", "failed", "skipped"],  # 允许的状态包括成功、失败和跳过
         failed_states=None,  # 不设置失败状态，确保无论主 DAG 状态如何都会继续执行
         execution_date_fn=print_target_date,  # 用于调试的日期打印函数

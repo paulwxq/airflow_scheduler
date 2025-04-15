@@ -395,11 +395,11 @@ def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
 def prepare_pipeline_dag_schedule(**kwargs):
     """准备Pipeline DAG调度任务的主函数"""
     # 检查是否是手动触发模式
-    is_force_refresh = False
+    is_manual_trigger = False
     params = kwargs.get('params', {})
-    if params and 'FORCE_REFRESH' in params:
-        is_force_refresh = params.get('FORCE_REFRESH', False)
-        logger.info(f"接收到强制刷新参数: FORCE_REFRESH={is_force_refresh}")
+    if params and 'MANUAL_TRIGGER' in params:
+        is_manual_trigger = params.get('MANUAL_TRIGGER', False)
+        logger.info(f"接收到手动触发参数: MANUAL_TRIGGER={is_manual_trigger}")
     
     # 获取执行日期
     dag_run = kwargs.get('dag_run')
@@ -436,9 +436,9 @@ def prepare_pipeline_dag_schedule(**kwargs):
             logger.info(f"检测到schedule_status表数据变更。旧哈希值: {last_hash}, 新哈希值: {current_hash}")
             need_create_plan = True
     
-    # 强制刷新模式覆盖以上判断
-    if is_force_refresh:
-        logger.info("强制刷新模式，将创建新的执行计划")
+    # 手动触发模式覆盖以上判断
+    if is_manual_trigger:
+        logger.info("手动触发模式，将创建新的执行计划")
         need_create_plan = True
     
     # 如果不需要创建新的执行计划，直接返回
@@ -603,7 +603,7 @@ with DAG(
         'retry_delay': timedelta(minutes=5)
     },
     params={
-        'FORCE_REFRESH': False,  # 添加强制刷新参数，默认为False
+        'MANUAL_TRIGGER': True, 
     },
 ) as dag:
     
