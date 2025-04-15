@@ -283,26 +283,66 @@ def get_subscription_state_hash():
         cursor.close()
         conn.close()
 
-def check_execution_plan_in_db(exec_date):
+def check_execution_plan_in_db(**kwargs):
     """
-    检查数据库中是否已存在指定日期的执行计划
+    检查当天的执行计划是否存在于数据库中
+    返回False将阻止所有下游任务执行
+    """
+    # 获取执行日期
+    dag_run = kwargs.get('dag_run')
+    logical_date = dag_run.logical_date
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
+    logger.info(f"logical_date： {logical_date} ")
+    logger.info(f"local_logical_date {local_logical_date} ")
+    logger.info(f"检查执行日期 exec_date {exec_date} 的执行计划是否存在于数据库中")
+   
     
-    参数:
-        exec_date (str): 执行日期，格式为YYYY-MM-DD
-        
-    返回:
-        bool: 如果存在返回True，否则返回False
-    """
+    # 检查数据库中是否存在执行计划
     conn = get_pg_conn()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT COUNT(*)
+            SELECT plan
             FROM airflow_exec_plans
-            WHERE ds = %s
+            WHERE exec_date = %s
+            ORDER BY logical_date DESC
+            LIMIT 1
         """, (exec_date,))
-        count = cursor.fetchone()[0]
-        return count > 0
+        
+        result = cursor.fetchone()
+        if not result:
+            logger.error(f"数据库中不存在执行日期 {exec_date} 的执行计划")
+            return False
+        
+        # 检查执行计划内容是否有效
+        try:
+            # PostgreSQL的jsonb类型会被psycopg2自动转换为Python字典，无需再使用json.loads
+            plan_data = result[0]            
+            # 检查必要字段
+            if "exec_date" not in plan_data:
+                logger.error("执行计划缺少exec_date字段")
+                return False
+                
+            if not isinstance(plan_data.get("resource_tasks", []), list):
+                logger.error("执行计划的resource_tasks字段无效")
+                return False
+                
+            if not isinstance(plan_data.get("model_tasks", []), list):
+                logger.error("执行计划的model_tasks字段无效")
+                return False
+            
+            # 检查是否有任务数据
+            resource_tasks = plan_data.get("resource_tasks", [])
+            model_tasks = plan_data.get("model_tasks", [])
+            
+            logger.info(f"执行计划验证成功: 包含 {len(resource_tasks)} 个资源任务和 {len(model_tasks)} 个模型任务")
+            return True
+            
+        except Exception as je:
+            logger.error(f"处理执行计划数据时出错: {str(je)}")
+            return False
+        
     except Exception as e:
         logger.error(f"检查数据库中执行计划时出错: {str(e)}")
         return False
@@ -331,15 +371,18 @@ def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
         # 将执行计划转换为JSON字符串
         plan_json = json.dumps(execution_plan)
         
+        # 获取本地时间
+        local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+        
         # 插入记录
         cursor.execute("""
             INSERT INTO airflow_exec_plans
-            (dag_id, run_id, logical_date, ds, plan)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (dag_id, run_id, logical_date, ds, plan_json))
+            (dag_id, run_id, logical_date, local_logical_date, exec_date, plan)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (dag_id, run_id, logical_date, local_logical_date, ds, plan_json))
         
         conn.commit()
-        logger.info(f"成功将执行计划保存到airflow_exec_plans表，dag_id={dag_id}, run_id={run_id}, ds={ds}")
+        logger.info(f"成功将执行计划保存到airflow_exec_plans表，dag_id={dag_id}, run_id={run_id}, exec_date={ds}")
         return True
     except Exception as e:
         logger.error(f"保存执行计划到数据库时出错: {str(e)}")
@@ -369,7 +412,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
     need_create_plan = False
     
     # 条件1: 数据库中不存在当天的执行计划
-    has_plan_in_db = check_execution_plan_in_db(exec_date)
+    has_plan_in_db = check_execution_plan_in_db(**kwargs)
     if not has_plan_in_db:
         logger.info(f"数据库中不存在执行日期exec_date {exec_date} 的执行计划，需要创建新的执行计划")
         need_create_plan = True
@@ -544,73 +587,6 @@ def prepare_pipeline_dag_schedule(**kwargs):
     
     return len(valid_tables)  # 返回有效表数量
 
-def check_execution_plan_db(**kwargs):
-    """
-    检查当天的执行计划是否存在于数据库中
-    返回False将阻止所有下游任务执行
-    """
-    # 获取执行日期
-    dag_run = kwargs.get('dag_run')
-    logical_date = dag_run.logical_date
-    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
-    exec_date = local_logical_date.strftime('%Y-%m-%d')
-    logger.info(f"logical_date： {logical_date} ")
-    logger.info(f"local_logical_date {local_logical_date} ")
-    logger.info(f"检查执行日期 exec_date {exec_date} 的执行计划是否存在于数据库中")
-   
-    
-    # 检查数据库中是否存在执行计划
-    conn = get_pg_conn()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            SELECT plan
-            FROM airflow_exec_plans
-            WHERE ds = %s
-            ORDER BY logical_date DESC
-            LIMIT 1
-        """, (exec_date,))
-        
-        result = cursor.fetchone()
-        if not result:
-            logger.error(f"数据库中不存在执行日期 {exec_date} 的执行计划")
-            return False
-        
-        # 检查执行计划内容是否有效
-        try:
-            # PostgreSQL的jsonb类型会被psycopg2自动转换为Python字典，无需再使用json.loads
-            plan_data = result[0]            
-            # 检查必要字段
-            if "exec_date" not in plan_data:
-                logger.error("执行计划缺少exec_date字段")
-                return False
-                
-            if not isinstance(plan_data.get("resource_tasks", []), list):
-                logger.error("执行计划的resource_tasks字段无效")
-                return False
-                
-            if not isinstance(plan_data.get("model_tasks", []), list):
-                logger.error("执行计划的model_tasks字段无效")
-                return False
-            
-            # 检查是否有任务数据
-            resource_tasks = plan_data.get("resource_tasks", [])
-            model_tasks = plan_data.get("model_tasks", [])
-            
-            logger.info(f"执行计划验证成功: 包含 {len(resource_tasks)} 个资源任务和 {len(model_tasks)} 个模型任务")
-            return True
-            
-        except Exception as je:
-            logger.error(f"处理执行计划数据时出错: {str(je)}")
-            return False
-        
-    except Exception as e:
-        logger.error(f"检查数据库中执行计划时出错: {str(e)}")
-        return False
-    finally:
-        cursor.close()
-        conn.close()
-
 # 创建DAG
 with DAG(
     "dag_dataops_pipeline_prepare_scheduler",
@@ -648,7 +624,7 @@ with DAG(
     # 检查执行计划是否存在于数据库中
     check_plan_in_db = ShortCircuitOperator(
         task_id="check_execution_plan_in_db",
-        python_callable=check_execution_plan_db,
+        python_callable=check_execution_plan_in_db,
         provide_context=True,
         dag=dag
     )

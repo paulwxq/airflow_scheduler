@@ -80,10 +80,10 @@ def validate_database_connection():
             
             # 检查最近的执行记录
             cursor.execute("""
-                SELECT ds, COUNT(*) as record_count
+                SELECT exec_date, COUNT(*) as record_count
                 FROM airflow_exec_plans
-                GROUP BY ds
-                ORDER BY ds DESC
+                GROUP BY exec_date
+                ORDER BY exec_date DESC
                 LIMIT 3
             """)
             recent_dates = cursor.fetchall()
@@ -443,7 +443,7 @@ def prepare_dag_schedule(**kwargs):
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     
     # 记录重要的时间参数
-    logger.info(f"【时间参数】prepare_dag_schedule: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
+    logger.info(f"【时间参数】prepare_dag_schedule: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info(f"开始准备执行日期 {exec_date} 的统一调度任务")
     
     # 1. 获取启用的表
@@ -530,6 +530,8 @@ def prepare_dag_schedule(**kwargs):
     # 创建执行计划
     execution_plan = {
         "exec_date": exec_date,
+        "logical_date": logical_date,
+        "local_logical_date": local_logical_date,
         "resource_tasks": resource_tasks,
         "model_tasks": model_tasks,
         "dependencies": dependencies
@@ -552,7 +554,7 @@ def check_execution_plan(**kwargs):
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     
     # 记录重要的时间参数
-    logger.info(f"【时间参数】check_execution_plan: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
+    logger.info(f"【时间参数】check_execution_plan: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info("检查数据库中的执行计划是否存在且有效")
     
     # 从数据库获取执行计划
@@ -654,7 +656,7 @@ def create_execution_plan(**kwargs):
         exec_date = local_logical_date.strftime('%Y-%m-%d')
         
         # 记录重要的时间参数
-        logger.info(f"【时间参数】create_execution_plan: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
+        logger.info(f"【时间参数】create_execution_plan: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
         
         # 从XCom获取执行计划
         execution_plan = kwargs['ti'].xcom_pull(task_ids='prepare_phase.prepare_dag_schedule', key='execution_plan')
@@ -814,7 +816,9 @@ def get_execution_stats(exec_date):
             }
         
         dag_run = dag_runs[0]
-        logger.debug(f"找到最近的DAG运行: logical_date={dag_run.logical_date}, updated_at={dag_run.updated_at}, state={dag_run.state}")
+        logical_date = dag_run.logical_date
+        local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+        logger.debug(f"找到最近的DAG运行: logical_date={logical_date}, local_logical_date={local_logical_date}, updated_at={dag_run.updated_at}, state={dag_run.state}")
         
         # 直接查询最近更新的任务实例，不再通过execution_date过滤
         # 只通过dag_id过滤，按更新时间降序排序
@@ -871,6 +875,8 @@ def get_execution_stats(exec_date):
         # 汇总统计信息
         stats = {
             "exec_date": exec_date,
+            "logical_date": logical_date,
+            "local_logical_date": local_logical_date,
             "dag_run_logical_date": dag_run.logical_date,
             "dag_run_updated_at": dag_run.updated_at,
             "total_tasks": total_tasks,
@@ -917,7 +923,7 @@ def summarize_execution(**kwargs):
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     
     # 记录重要的时间参数
-    logger.debug(f"【时间参数】summarize_execution: ds={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
+    logger.debug(f"【时间参数】summarize_execution: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.debug(f"开始汇总执行日期 {exec_date} 的执行情况")
     
     # 获取任务实例对象
@@ -976,6 +982,8 @@ def summarize_execution(**kwargs):
     if not stats or 'total_tasks' not in stats:
         stats = {
             "exec_date": exec_date,
+            "logical_date": logical_date,
+            "local_logical_date": local_logical_date,
             "total_tasks": 0,
             "type_counts": {},
             "success_count": 0,
@@ -1030,11 +1038,11 @@ def get_execution_plan_from_db(ds):
     execution_plan = None
     
     try:
-        # 查询条件a: 当前日期=表的ds，如果有多条记录，取insert_time最大的一条
+        # 查询条件a: 当前日期=表的exec_date，如果有多条记录，取insert_time最大的一条
         cursor.execute("""
             SELECT plan, run_id, insert_time
             FROM airflow_exec_plans
-            WHERE dag_id = 'dag_dataops_pipeline_prepare_scheduler' AND ds = %s
+            WHERE dag_id = 'dag_dataops_pipeline_prepare_scheduler' AND exec_date = %s
             ORDER BY insert_time DESC
             LIMIT 1
         """, (ds,))
@@ -1043,7 +1051,7 @@ def get_execution_plan_from_db(ds):
         if result:
             # 获取计划、run_id和insert_time
             plan_json, run_id, insert_time = result
-            logger.info(f"找到当前日期 ds={ds} 的执行计划记录，run_id: {run_id}, insert_time: {insert_time}")
+            logger.info(f"找到当前日期 exec_date={ds} 的执行计划记录，run_id: {run_id}, insert_time: {insert_time}")
             
             # 处理plan_json可能已经是dict的情况
             if isinstance(plan_json, dict):
@@ -1053,21 +1061,21 @@ def get_execution_plan_from_db(ds):
                 
             return execution_plan
         
-        # 查询条件b: 找不到当前日期的记录，查找ds<当前ds的最新记录
-        logger.info(f"未找到当前日期 ds={ds} 的执行计划记录，尝试查找历史记录")
+        # 查询条件b: 找不到当前日期的记录，查找exec_date<当前ds的最新记录
+        logger.info(f"未找到当前日期 exec_date={ds} 的执行计划记录，尝试查找历史记录")
         cursor.execute("""
-            SELECT plan, run_id, insert_time, ds
+            SELECT plan, run_id, insert_time, exec_date
             FROM airflow_exec_plans
-            WHERE dag_id = 'dag_dataops_pipeline_prepare_scheduler' AND ds < %s
-            ORDER BY ds DESC, insert_time DESC
+            WHERE dag_id = 'dag_dataops_pipeline_prepare_scheduler' AND exec_date < %s
+            ORDER BY exec_date DESC, insert_time DESC
             LIMIT 1
         """, (ds,))
         result = cursor.fetchone()
         
         if result:
-            # 获取计划、run_id、insert_time和ds
+            # 获取计划、run_id、insert_time和exec_date
             plan_json, run_id, insert_time, plan_ds = result
-            logger.info(f"找到历史执行计划记录，ds: {plan_ds}, run_id: {run_id}, insert_time: {insert_time}")
+            logger.info(f"找到历史执行计划记录，exec_date: {plan_ds}, run_id: {run_id}, insert_time: {insert_time}")
             
             # 处理plan_json可能已经是dict的情况
             if isinstance(plan_json, dict):
@@ -1078,7 +1086,7 @@ def get_execution_plan_from_db(ds):
             return execution_plan
         
         # 找不到任何执行计划记录
-        logger.error(f"在数据库中未找到任何执行计划记录，当前DAG ds={ds}")
+        logger.error(f"在数据库中未找到任何执行计划记录，当前DAG exec_date={ds}")
         return None
         
     except Exception as e:
@@ -1212,7 +1220,7 @@ with DAG(
         
         # 检查是否成功获取到执行计划
         if execution_plan is None:
-            error_msg = f"无法从数据库获取有效的执行计划，当前DAG ds={exec_date}"
+            error_msg = f"无法从数据库获取有效的执行计划，当前DAG exec_date={exec_date}"
             logger.error(error_msg)
             # 使用全局变量而不是异常来强制DAG失败
             raise ValueError(error_msg)
@@ -1230,7 +1238,7 @@ with DAG(
         
         # 如果执行计划为空（没有任务），也应该失败
         if not resource_tasks and not model_tasks:
-            error_msg = f"执行计划中没有任何任务，当前DAG ds={exec_date}"
+            error_msg = f"执行计划中没有任何任务，当前DAG exec_date={exec_date}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
