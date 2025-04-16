@@ -889,7 +889,7 @@ with DAG(
         'retry_delay': timedelta(minutes=5)
     },
     params={
-        'MANUAL_TRIGGER': True, 
+        'MANUAL_TRIGGER': False, 
     },
     # 添加DAG级别参数，确保任务运行时有正确的环境
     # params={

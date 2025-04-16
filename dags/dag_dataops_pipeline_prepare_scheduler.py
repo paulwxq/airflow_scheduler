@@ -399,7 +399,8 @@ def prepare_pipeline_dag_schedule(**kwargs):
     params = kwargs.get('params', {})
     if params and 'MANUAL_TRIGGER' in params:
         is_manual_trigger = params.get('MANUAL_TRIGGER', False)
-        logger.info(f"接收到手动触发参数: MANUAL_TRIGGER={is_manual_trigger}")
+        if is_manual_trigger:
+            logger.info(f"接收到手动触发参数: MANUAL_TRIGGER={is_manual_trigger}")
     
     # 获取执行日期
     dag_run = kwargs.get('dag_run')
@@ -603,7 +604,7 @@ with DAG(
         'retry_delay': timedelta(minutes=5)
     },
     params={
-        'MANUAL_TRIGGER': True, 
+        'MANUAL_TRIGGER': False, 
     },
 ) as dag:
     
