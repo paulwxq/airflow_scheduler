@@ -10,15 +10,15 @@
   - 'source'：查找并执行完整依赖链到Source层
 
 参数：
-- TABLE_NAME：目标表名
-- DEPENDENCY_LEVEL/UPPER_LEVEL_STOP：依赖级别
+- table_name：目标表名
+- dependency_level：依赖级别
 
 使用示例：
 ```
 {
   "conf": {
-    "TABLE_NAME": "book_sale_amt_2yearly",
-    "DEPENDENCY_LEVEL": "resource"
+    "table_name": "book_sale_amt_2yearly",
+    "dependency_level": "resource"
   }
 }
 ```
@@ -88,19 +88,15 @@ def get_execution_mode(table_name):
 def get_dag_params(**context):
     """获取DAG运行参数"""
     params = context.get('params', {})
-    table_name = params.get('TABLE_NAME')
+    table_name = params.get('table_name')
     
     # 记录原始参数信息
     logger.info(f"接收到的原始参数: {params}")
     
-    # 同时检查DEPENDENCY_LEVEL和UPPER_LEVEL_STOP参数，兼容两种参数名
-    dependency_level = params.get('DEPENDENCY_LEVEL')
-    logger.info(f"从DEPENDENCY_LEVEL获取的值: {dependency_level}")
-    
-    if dependency_level is None:
-        dependency_level = params.get('UPPER_LEVEL_STOP', 'resource')  # 兼容旧参数名
-        logger.info(f"从UPPER_LEVEL_STOP获取的值: {dependency_level}")
-    
+    # 获取依赖级别参数
+    dependency_level = params.get('dependency_level')
+    logger.info(f"获取的依赖级别值: {dependency_level}")
+
     if not table_name:
         raise ValueError("必须提供TABLE_NAME参数")
     
@@ -409,11 +405,9 @@ def build_dependency_chain_nx(start_table, dependency_level='resource'):
 
 def execute_scripts(scripts_list):
     """
-    执行指定的脚本列表
-    
+    执行指定的脚本列表    
     参数:
-        scripts_list (list): 要执行的脚本信息列表，每项包含table_name, script_name, execution_mode
-        
+        scripts_list (list): 要执行的脚本信息列表，每项包含table_name, script_name, execution_mode        
     返回:
         bool: 全部执行成功返回True，任一失败返回False
     """
@@ -557,7 +551,7 @@ def process_resources(**context):
     table_name = None
     if dependency_level == 'self':
         params = context.get('params', {})
-        table_name = params.get('TABLE_NAME') or params.get('table_name')
+        table_name = params.get('table_name')
         logger.info(f"依赖级别为'self'，目标表: {table_name}")
     
     # 根据依赖级别过滤要执行的脚本
@@ -605,7 +599,7 @@ def process_models(**context):
     
     # 获取表名（在所有级别都需要）
     params = context.get('params', {})
-    table_name = params.get('TABLE_NAME') or params.get('table_name')
+    table_name = params.get('table_name')
     logger.info(f"目标表: {table_name}")
     
     # 如果依赖级别是'self'，只处理起始表
@@ -638,19 +632,12 @@ with DAG(
     catchup=False,
     is_paused_upon_creation=True,  # 添加这一行，使DAG创建时不处于暂停状态
     params={
-        'TABLE_NAME': '',
-        'DEPENDENCY_LEVEL': {
+        'table_name': '',
+        'dependency_level': {
             'type': 'string',
             'enum': ['self', 'resource', 'source'],
             'default': 'resource',
             'description': '依赖级别: self-仅本表, resource-到Resource层(不执行Resource脚本), source-到Source层'
-        },
-        # 添加旧参数名，保持兼容性
-        'UPPER_LEVEL_STOP': {
-            'type': 'string',
-            'enum': ['self', 'resource', 'source'],
-            'default': 'resource',
-            'description': '依赖级别(旧参数名): self-仅本表, resource-到Resource层(不执行Resource脚本), source-到Source层'
         }
     },
 ) as dag:

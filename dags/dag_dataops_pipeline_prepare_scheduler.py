@@ -42,7 +42,7 @@ def get_enabled_tables():
         conn.close()
 
 def check_table_directly_subscribed(table_name):
-    """检查表是否在schedule_status表中直接订阅"""
+    """检查表是否在schedule_status表中直接调度"""
     conn = get_pg_conn()
     cursor = conn.cursor()
     try:
@@ -59,6 +59,64 @@ def check_table_directly_subscribed(table_name):
     finally:
         cursor.close()
         conn.close()
+
+
+def should_execute_today(table_name, frequency, exec_date):
+    """
+    判断指定频率的表在给定执行日期是否应该执行
+    
+    参数:
+        table_name (str): 表名，用于日志记录
+        frequency (str): 调度频率，如'daily'、'weekly'、'monthly'、'yearly'，为None时默认为'daily'
+        exec_date (str): 执行日期，格式为'YYYY-MM-DD'
+    
+    返回:
+        bool: 如果该表应该在执行日期执行，则返回True，否则返回False
+    """
+    # 将执行日期字符串转换为pendulum日期对象
+    try:
+        exec_date_obj = pendulum.parse(exec_date)
+    except Exception as e:
+        logger.error(f"解析执行日期 {exec_date} 出错: {str(e)}，使用当前日期")
+        exec_date_obj = pendulum.today()
+    
+    # 计算下一个日期，用于判断是否是月初、周初等
+    next_date = exec_date_obj.add(days=1)
+    
+    # 如果频率为None或空字符串，默认为daily
+    if not frequency:
+        logger.info(f"表 {table_name} 未指定调度频率，默认为daily")
+        return True
+    
+    frequency = frequency.lower() if isinstance(frequency, str) else 'daily'
+    
+    if frequency == 'daily':
+        # 日任务每天都执行
+        return True
+    elif frequency == 'weekly':
+        # 周任务只在周日执行（因为exec_date+1是周一时才执行）
+        is_sunday = next_date.day_of_week == 1  # 1表示周一
+        logger.info(f"表 {table_name} 是weekly任务，exec_date={exec_date}，next_date={next_date.to_date_string()}，是否周日: {is_sunday}")
+        return is_sunday
+    elif frequency == 'monthly':
+        # 月任务只在每月最后一天执行（因为exec_date+1是月初时才执行）
+        is_month_end = next_date.day == 1
+        logger.info(f"表 {table_name} 是monthly任务，exec_date={exec_date}，next_date={next_date.to_date_string()}，是否月末: {is_month_end}")
+        return is_month_end
+    elif frequency == 'quarterly':
+        # 季度任务只在每季度最后一天执行（因为exec_date+1是季度初时才执行）
+        is_quarter_end = next_date.day == 1 and next_date.month in [1, 4, 7, 10]
+        logger.info(f"表 {table_name} 是quarterly任务，exec_date={exec_date}，next_date={next_date.to_date_string()}，是否季末: {is_quarter_end}")
+        return is_quarter_end
+    elif frequency == 'yearly':
+        # 年任务只在每年最后一天执行（因为exec_date+1是年初时才执行）
+        is_year_end = next_date.day == 1 and next_date.month == 1
+        logger.info(f"表 {table_name} 是yearly任务，exec_date={exec_date}，next_date={next_date.to_date_string()}，是否年末: {is_year_end}")
+        return is_year_end
+    else:
+        # 未知频率，默认执行
+        logger.warning(f"表 {table_name} 使用未知的调度频率: {frequency}，默认执行")
+        return True
 
 def get_table_info_from_neo4j(table_name):
     """从Neo4j获取表的详细信息"""
@@ -465,8 +523,23 @@ def prepare_pipeline_dag_schedule(**kwargs):
     
     logger.info(f"成功获取 {len(tables_info)} 个表的详细信息")
     
+    # 2.1 根据调度频率过滤表（新增的步骤）
+    filtered_tables_info = []
+    for table_info in tables_info:
+        table_name = table_info['target_table']
+        frequency = table_info.get('default_update_frequency')
+        
+        if should_execute_today(table_name, frequency, exec_date):
+            filtered_tables_info.append(table_info)
+            logger.info(f"表 {table_name} (频率: {frequency}) 将在今天{exec_date}执行")
+        else:
+            logger.info(f"表 {table_name} (频率: {frequency}) 今天{exec_date}不执行，已过滤")
+    
+    logger.info(f"按调度频率过滤后，今天{exec_date}需要执行的表有 {len(filtered_tables_info)} 个")
+
+
     # 3. 处理依赖关系，添加被动调度的表
-    enriched_tables = process_dependencies(tables_info)
+    enriched_tables = process_dependencies(filtered_tables_info)
     logger.info(f"处理依赖后，总共有 {len(enriched_tables)} 个表")
     
     # 4. 过滤无效表及其依赖
