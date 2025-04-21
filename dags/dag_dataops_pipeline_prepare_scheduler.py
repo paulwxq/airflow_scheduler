@@ -143,7 +143,8 @@ def get_table_info_from_neo4j(table_name):
                 labels = record.get("labels", [])
                 table_info['target_table_label'] = [label for label in labels if label in ["DataResource", "DataModel", "DataSource"]][0] if labels else None
                 table_info['target_table_status'] = record.get("status", True)  # 默认为True
-                table_info['default_update_frequency'] = record.get("frequency")
+                # table_info['default_update_frequency'] = record.get("frequency")
+                table_info['frequency'] = record.get("frequency")
                 
                 # 根据标签类型查询关系和脚本信息
                 if "DataResource" in labels:
@@ -221,8 +222,8 @@ def process_dependencies(tables_info):
                             dep_info['is_directly_schedule'] = False
                             
                             # 处理调度频率继承
-                            if not dep_info.get('default_update_frequency'):
-                                dep_info['default_update_frequency'] = table_info.get('default_update_frequency')
+                            if not dep_info.get('frequency'):
+                                dep_info['frequency'] = table_info.get('frequency')
                             
                             all_tables[dep_name] = dep_info
     except Exception as e:
@@ -527,7 +528,7 @@ def prepare_pipeline_dag_schedule(**kwargs):
     filtered_tables_info = []
     for table_info in tables_info:
         table_name = table_info['target_table']
-        frequency = table_info.get('default_update_frequency')
+        frequency = table_info.get('frequency')
         
         if should_execute_today(table_name, frequency, exec_date):
             filtered_tables_info.append(table_info)
@@ -559,7 +560,8 @@ def prepare_pipeline_dag_schedule(**kwargs):
                     "target_table": table['target_table'],
                     "target_table_label": "DataResource",
                     "script_name": table.get('script_name'),
-                    "script_exec_mode": table.get('script_exec_mode', 'append')
+                    "script_exec_mode": table.get('script_exec_mode', 'append'),
+                    "frequency": table.get('frequency')
                 })
             elif table.get('target_table_label') == 'DataModel':
                 model_tasks.append({
@@ -567,7 +569,8 @@ def prepare_pipeline_dag_schedule(**kwargs):
                     "target_table": table['target_table'],
                     "target_table_label": "DataModel",
                     "script_name": table.get('script_name'),
-                    "script_exec_mode": table.get('script_exec_mode', 'append')
+                    "script_exec_mode": table.get('script_exec_mode', 'append'),
+                    "frequency": table.get('frequency')
                 })
         
         # 获取依赖关系
