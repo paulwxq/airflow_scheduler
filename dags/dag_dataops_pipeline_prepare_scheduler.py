@@ -259,57 +259,6 @@ def process_dependencies(tables_info):
     
     return list(all_tables.values())
 
-def process_resource(target_table, script_name, script_exec_mode, exec_date, **kwargs):
-    """处理单个资源表"""
-    task_id = f"resource_{target_table}"
-    logger.info(f"===== 开始执行 {task_id} =====")
-    logger.info(f"执行资源表 {target_table} 的脚本 {script_name}")
-    
-    # 确保exec_date是字符串
-    if not isinstance(exec_date, str):
-        exec_date = str(exec_date)
-        logger.info(f"将exec_date转换为字符串: {exec_date}")
-    
-    # 获取额外参数
-    target_type = kwargs.get('target_type')
-    storage_location = kwargs.get('storage_location')
-    frequency = kwargs.get('frequency')
-    
-    try:
-        # 使用新的函数执行脚本，传递相应参数
-        logger.info(f"调用execute_python_script: target_table={target_table}, script_name={script_name}")
-        
-        # 构建参数字典
-        script_params = {
-            "target_table": target_table,
-            "script_name": script_name,
-            "script_exec_mode": script_exec_mode,
-            "exec_date": exec_date
-        }
-        
-        # 添加特殊参数（如果有）
-        if target_type == "structure":
-            logger.info(f"处理structure类型的资源表，文件路径: {storage_location}")
-            script_params["target_type"] = target_type
-            script_params["storage_location"] = storage_location
-        
-        if frequency:
-            script_params["frequency"] = frequency
-        
-        # 执行脚本
-        result = execute_python_script(**script_params)
-        logger.info(f"资源表 {target_table} 处理完成，结果: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"处理资源表 {target_table} 时出错: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        logger.info(f"===== 结束执行 {task_id} (失败) =====")
-        return False
-    finally:
-        logger.info(f"===== 结束执行 {task_id} =====")
-        
-
 def filter_invalid_tables(tables_info):
     """过滤无效表及其依赖，使用NetworkX构建依赖图"""
     # 构建表名到索引的映射

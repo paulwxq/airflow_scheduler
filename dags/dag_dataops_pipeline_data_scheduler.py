@@ -171,7 +171,7 @@ def execute_python_script(target_table, script_name, script_exec_mode, exec_date
         # 导入和执行脚本模块
         import importlib.util
         import sys
-        
+        # SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"
         script_path = os.path.join(SCRIPTS_BASE_PATH, script_name)
         
         if not os.path.exists(script_path):
