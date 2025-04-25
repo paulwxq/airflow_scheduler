@@ -25,6 +25,8 @@ from common import (
 )
 from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG
 import pytz
+import pandas as pd
+import sys
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -63,6 +65,21 @@ class DecimalEncoder(json.JSONEncoder):
             return obj.isoformat()
         # 让父类处理其他类型
         return super(DecimalEncoder, self).default(obj)
+    
+
+def get_logical_exec_date(logical_date):
+    """
+    获取逻辑执行日期
+    
+    参数:
+        logical_date: 逻辑执行日期，UTC时间
+
+    返回:
+        logical_exec_date: 逻辑执行日期，北京时间
+    """
+    # 获取逻辑执行日期
+    return logical_date.in_timezone('Asia/Shanghai').to_date_string()
+
 
 #############################################
 # 脚本执行函数
@@ -95,6 +112,10 @@ def execute_script(script_id, script_name, target_table, exec_date, script_exec_
     for key, value in kwargs.items():
         logger.info(f"额外参数 - {key}: {value}, 类型: {type(value)}")
 
+    # 获取逻辑执行日期
+    logical_exec_date = get_logical_exec_date(exec_date)
+    logger.info(f"逻辑执行日期: {logical_exec_date}")
+
     # 检查script_name是否为空
     if not script_name:
         logger.error(f"脚本ID {script_id} 的script_name为空，无法执行")
@@ -109,14 +130,25 @@ def execute_script(script_id, script_name, target_table, exec_date, script_exec_
         import sys
         script_path = os.path.join(SCRIPTS_BASE_PATH, script_name)
         
-        if not os.path.exists(script_path):
-            logger.error(f"脚本文件不存在: {script_path}")
-            return False
+        # 获取脚本类型
+        script_type = kwargs.get('script_type', 'python_script')
+        
+        # 只有当脚本类型为 sql_script 或 python_script 时才检查文件是否存在
+        if script_type in ['sql_script', 'python_script']:
+            if not os.path.exists(script_path):
+                logger.error(f"脚本文件不存在: {script_path}")
+                return False
             
-        # 动态导入模块
-        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+            # 动态导入模块
+            spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        else:
+            # 对于其他类型，例如默认python类型，我们将使用其他执行方式
+            logger.info(f"脚本类型为 {script_type}，不检查脚本文件是否存在")
+            # 这里我们将直接退出，因为对于python类型应使用execute_python_script函数
+            logger.error(f"脚本类型为 {script_type}，应使用专用函数执行，而不是execute_script")
+            return False
         
         # 检查并调用标准入口函数run
         if hasattr(module, "run"):
@@ -157,12 +189,458 @@ def execute_script(script_id, script_name, target_table, exec_date, script_exec_
             logger.error(f"脚本 {script_name} 中未定义标准入口函数 run()，无法执行")
             return False
     except Exception as e:
-        # a处理异常
+        # 处理异常
         logger.error(f"执行脚本 {script_id} 出错: {str(e)}")
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
         logger.error(f"脚本 {script_name} 执行失败，耗时: {duration:.2f}秒")
         logger.info(f"===== 脚本执行异常结束 =====")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 确保不会阻塞DAG
+        return False
+
+def execute_sql_script(script_id, script_name, target_table, exec_date, script_exec_mode='append', **kwargs):
+    """
+    执行SQL脚本并返回执行结果
+    
+    参数:
+        script_id: 脚本ID
+        script_name: 脚本名称
+        target_table: 目标表名
+        exec_date: 执行日期
+        script_exec_mode: 执行模式
+        **kwargs: 其他参数
+    
+    返回:
+        bool: 脚本执行结果
+    """
+    # 添加详细日志
+    logger.info(f"===== 开始执行SQL脚本 {script_id} =====")
+    logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
+    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
+    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
+    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
+    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
+
+    # 记录额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}, 类型: {type(value)}")
+
+    # 记录执行开始时间
+    start_time = datetime.now()
+
+    try:
+        # 导入和执行execution_sql模块
+        import importlib.util
+        import sys
+        exec_sql_path = os.path.join(SCRIPTS_BASE_PATH, "execution_sql.py")
+
+        # 对于SQL类型的脚本，我们不检查它是否作为文件存在
+        # 但是我们需要检查execution_sql.py是否存在
+        if not os.path.exists(exec_sql_path):
+            logger.error(f"SQL执行脚本文件不存在: {exec_sql_path}")
+            return False
+
+        # 动态导入execution_sql模块
+        try:
+            spec = importlib.util.spec_from_file_location("execution_sql", exec_sql_path)
+            exec_sql_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(exec_sql_module)
+            logger.info(f"成功导入 execution_sql 模块")
+        except Exception as import_err:
+            logger.error(f"导入 execution_sql 模块时出错: {str(import_err)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+        # 检查并调用标准入口函数run
+        if hasattr(exec_sql_module, "run"):
+            logger.info(f"调用执行SQL脚本的标准入口函数 run()")
+
+            # 获取频率参数
+            frequency = kwargs.get('frequency', 'daily')  # 默认为daily
+            
+            # 构建完整的参数字典
+            run_params = {
+                "script_type": "sql",
+                "target_table": target_table,
+                "script_name": script_name,
+                "exec_date": exec_date,
+                "frequency": frequency,
+                "target_table_label": kwargs.get('target_table_label', ''), # 传递目标表标签，用于ETL幂等性判断
+                "execution_mode": script_exec_mode  # 传递执行模式参数
+            }
+
+            # 添加可能的额外参数
+            for key in ['target_type', 'storage_location', 'source_tables']:
+                if key in kwargs and kwargs[key] is not None:
+                    run_params[key] = kwargs[key]
+
+            # 调用execution_sql.py的run函数
+            logger.info(f"调用SQL执行脚本的run函数并传递参数: {run_params}")
+            result = exec_sql_module.run(**run_params)
+            logger.info(f"SQL脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
+
+            # 确保result是布尔值
+            if result is None:
+                logger.warning(f"SQL脚本返回值为None，转换为False")
+                result = False
+            elif not isinstance(result, bool):
+                original_result = result
+                result = bool(result)
+                logger.warning(f"SQL脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+
+            # 记录结束时间和结果
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logger.info(f"SQL脚本 {script_name} 执行完成，结果: {result}, 耗时: {duration:.2f}秒")
+
+            return result
+        else:
+            logger.error(f"执行SQL脚本 execution_sql.py 中未定义标准入口函数 run()，无法执行")
+            return False
+
+    except Exception as e:
+        # 处理异常
+        logger.error(f"执行SQL脚本 {script_id} 出错: {str(e)}")
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.error(f"SQL脚本 {script_name} 执行失败，耗时: {duration:.2f}秒")
+        logger.info(f"===== SQL脚本执行异常结束 =====")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 确保不会阻塞DAG
+        return False
+
+# 重命名此函数为execute_python_script
+def execute_python_script(script_id, script_name, target_table, exec_date, script_exec_mode='append', **kwargs):
+    """
+    执行Python脚本文件并返回执行结果
+    
+    参数:
+        script_id: 脚本ID
+        script_name: 脚本文件名（.py文件）
+        target_table: 目标表名
+        exec_date: 执行日期
+        script_exec_mode: 执行模式
+        **kwargs: 其他参数，如source_tables、target_type等
+    
+    返回:
+        bool: 脚本执行结果
+    """
+    # 添加详细日志
+    logger.info(f"===== 开始执行Python脚本文件 {script_id} =====")
+    logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
+    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
+    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
+    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
+    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
+
+    # 记录额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}, 类型: {type(value)}")
+
+    # 检查script_name是否为空
+    if not script_name:
+        logger.error(f"脚本ID {script_id} 的script_name为空，无法执行")
+        return False
+        
+    # 记录执行开始时间
+    start_time = datetime.now()
+    
+    try:
+        # 导入和执行脚本模块
+        import importlib.util
+        import sys
+        script_path = os.path.join(SCRIPTS_BASE_PATH, script_name)
+        
+        if not os.path.exists(script_path):
+            logger.error(f"脚本文件不存在: {script_path}")
+            return False
+            
+        # 动态导入模块
+        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        # 检查并调用标准入口函数run
+        if hasattr(module, "run"):
+            logger.info(f"调用脚本文件 {script_name} 的标准入口函数 run()")
+            # 构建完整的参数字典
+            run_params = {
+                "table_name": target_table,
+                "execution_mode": script_exec_mode,
+                "exec_date": exec_date
+            }
+
+            ## 添加可能的额外参数
+            for key in ['target_type', 'storage_location', 'frequency', 'source_tables']:
+                if key in kwargs and kwargs[key] is not None:
+                    run_params[key] = kwargs[key] 
+
+            # 调用脚本的run函数
+            logger.info(f"调用run函数并传递参数: {run_params}")
+            result = module.run(**run_params)
+            logger.info(f"脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
+            
+            # 确保result是布尔值
+            if result is None:
+                logger.warning(f"脚本返回值为None，转换为False")
+                result = False
+            elif not isinstance(result, bool):
+                original_result = result
+                result = bool(result)
+                logger.warning(f"脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+            
+            # 记录结束时间和结果
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logger.info(f"脚本 {script_name} 执行完成，结果: {result}, 耗时: {duration:.2f}秒")
+            
+            return result
+        else:
+            logger.error(f"脚本 {script_name} 中未定义标准入口函数 run()，无法执行")
+            return False
+    except Exception as e:
+        # 处理异常
+        logger.error(f"执行脚本 {script_id} 出错: {str(e)}")
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.error(f"脚本 {script_name} 执行失败，耗时: {duration:.2f}秒")
+        logger.info(f"===== 脚本执行异常结束 =====")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 确保不会阻塞DAG
+        return False
+
+# 使用execute_sql函数代替之前的execute_sql_script
+def execute_sql(script_id, script_name, target_table, exec_date, script_exec_mode='append', **kwargs):
+    """
+    执行SQL脚本并返回执行结果
+    
+    参数:
+        script_id: 脚本ID
+        script_name: 脚本名称(数据库中的名称)
+        target_table: 目标表名
+        exec_date: 执行日期
+        script_exec_mode: 执行模式
+        **kwargs: 其他参数
+    
+    返回:
+        bool: 脚本执行结果
+    """
+    # 添加详细日志
+    logger.info(f"===== 开始执行SQL脚本 {script_id} =====")
+    logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
+    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
+    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
+    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
+    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
+
+    # 记录额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}, 类型: {type(value)}")
+
+    # 记录执行开始时间
+    start_time = datetime.now()
+
+    try:
+        # 导入和执行execution_sql模块
+        import importlib.util
+        import sys
+        exec_sql_path = os.path.join(SCRIPTS_BASE_PATH, "execution_sql.py")
+
+        # 对于SQL类型的脚本，我们不检查它是否作为文件存在
+        # 但是我们需要检查execution_sql.py是否存在
+        if not os.path.exists(exec_sql_path):
+            logger.error(f"SQL执行脚本文件不存在: {exec_sql_path}")
+            return False
+
+        # 动态导入execution_sql模块
+        try:
+            spec = importlib.util.spec_from_file_location("execution_sql", exec_sql_path)
+            exec_sql_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(exec_sql_module)
+            logger.info(f"成功导入 execution_sql 模块")
+        except Exception as import_err:
+            logger.error(f"导入 execution_sql 模块时出错: {str(import_err)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+        # 检查并调用标准入口函数run
+        if hasattr(exec_sql_module, "run"):
+            logger.info(f"调用执行SQL脚本的标准入口函数 run()")
+
+            # 获取频率参数
+            frequency = kwargs.get('frequency', 'daily')  # 默认为daily
+            
+            # 构建完整的参数字典
+            run_params = {
+                "script_type": "sql",
+                "target_table": target_table,
+                "script_name": script_name,
+                "exec_date": exec_date,
+                "frequency": frequency,
+                "target_table_label": kwargs.get('target_table_label', ''), # 传递目标表标签，用于ETL幂等性判断
+                "execution_mode": script_exec_mode  # 传递执行模式参数
+            }
+
+            # 添加可能的额外参数
+            for key in ['target_type', 'storage_location', 'source_tables']:
+                if key in kwargs and kwargs[key] is not None:
+                    run_params[key] = kwargs[key]
+
+            # 调用execution_sql.py的run函数
+            logger.info(f"调用SQL执行脚本的run函数并传递参数: {run_params}")
+            result = exec_sql_module.run(**run_params)
+            logger.info(f"SQL脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
+
+            # 确保result是布尔值
+            if result is None:
+                logger.warning(f"SQL脚本返回值为None，转换为False")
+                result = False
+            elif not isinstance(result, bool):
+                original_result = result
+                result = bool(result)
+                logger.warning(f"SQL脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+
+            # 记录结束时间和结果
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logger.info(f"SQL脚本 {script_name} 执行完成，结果: {result}, 耗时: {duration:.2f}秒")
+
+            return result
+        else:
+            logger.error(f"执行SQL脚本 execution_sql.py 中未定义标准入口函数 run()，无法执行")
+            return False
+
+    except Exception as e:
+        # 处理异常
+        logger.error(f"执行SQL脚本 {script_id} 出错: {str(e)}")
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.error(f"SQL脚本 {script_name} 执行失败，耗时: {duration:.2f}秒")
+        logger.info(f"===== SQL脚本执行异常结束 =====")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # 确保不会阻塞DAG
+        return False
+
+# 使用execute_python函数代替之前的execute_python_script
+def execute_python(script_id, script_name, target_table, exec_date, script_exec_mode='append', **kwargs):
+    """
+    执行Python脚本并返回执行结果
+    
+    参数:
+        script_id: 脚本ID
+        script_name: 脚本名称(数据库中的名称)
+        target_table: 目标表名
+        exec_date: 执行日期
+        script_exec_mode: 执行模式
+        **kwargs: 其他参数
+    
+    返回:
+        bool: 脚本执行结果
+    """
+    # 添加详细日志
+    logger.info(f"===== 开始执行Python脚本 {script_id} =====")
+    logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
+    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
+    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
+    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
+    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
+
+    # 记录额外参数
+    for key, value in kwargs.items():
+        logger.info(f"额外参数 - {key}: {value}, 类型: {type(value)}")
+
+    # 记录执行开始时间
+    start_time = datetime.now()
+
+    try:
+        # 导入和执行execution_python模块
+        import importlib.util
+        import sys
+        exec_python_path = os.path.join(SCRIPTS_BASE_PATH, "execution_python.py")
+
+        # 对于Python类型的脚本，我们不检查它是否作为文件存在
+        # 但是我们需要检查execution_python.py是否存在
+        if not os.path.exists(exec_python_path):
+            logger.error(f"Python执行脚本文件不存在: {exec_python_path}")
+            return False
+
+        # 动态导入execution_python模块
+        try:
+            spec = importlib.util.spec_from_file_location("execution_python", exec_python_path)
+            exec_python_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(exec_python_module)
+            logger.info(f"成功导入 execution_python 模块")
+        except Exception as import_err:
+            logger.error(f"导入 execution_python 模块时出错: {str(import_err)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+        # 检查并调用标准入口函数run
+        if hasattr(exec_python_module, "run"):
+            logger.info(f"调用执行Python脚本的标准入口函数 run()")
+
+            # 获取频率参数
+            frequency = kwargs.get('frequency', 'daily')  # 默认为daily
+            
+            # 构建完整的参数字典
+            run_params = {
+                "script_type": "python",
+                "target_table": target_table,
+                "script_name": script_name,
+                "exec_date": exec_date,
+                "frequency": frequency,
+                "target_table_label": kwargs.get('target_table_label', ''), # 传递目标表标签
+                "execution_mode": script_exec_mode  # 传递执行模式参数
+            }
+
+            # 添加可能的额外参数
+            for key in ['target_type', 'storage_location', 'source_tables']:
+                if key in kwargs and kwargs[key] is not None:
+                    run_params[key] = kwargs[key]
+
+            # 调用execution_python.py的run函数
+            logger.info(f"调用Python执行脚本的run函数并传递参数: {run_params}")
+            result = exec_python_module.run(**run_params)
+            logger.info(f"Python脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
+
+            # 确保result是布尔值
+            if result is None:
+                logger.warning(f"Python脚本返回值为None，转换为False")
+                result = False
+            elif not isinstance(result, bool):
+                original_result = result
+                result = bool(result)
+                logger.warning(f"Python脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+
+            # 记录结束时间和结果
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logger.info(f"Python脚本 {script_name} 执行完成，结果: {result}, 耗时: {duration:.2f}秒")
+
+            return result
+        else:
+            logger.error(f"执行Python脚本 execution_python.py 中未定义标准入口函数 run()，无法执行")
+            return False
+
+    except Exception as e:
+        # 处理异常
+        logger.error(f"执行Python脚本 {script_id} 出错: {str(e)}")
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.error(f"Python脚本 {script_name} 执行失败，耗时: {duration:.2f}秒")
+        logger.info(f"===== Python脚本执行异常结束 =====")
         import traceback
         logger.error(traceback.format_exc())
         
@@ -446,7 +924,7 @@ with DAG(
     now = datetime.now()
     now_with_tz = now.replace(tzinfo=pytz.timezone('Asia/Shanghai'))
     default_exec_date = get_today_date()
-    logger.info(f"【DAG初始化】当前时间: {now} / {now_with_tz}, 默认执行日期: {default_exec_date}")
+    logger.info(f"【DAG初始化】当前时间: {now} / {now_with_tz}, 默认执行日期(用于初始化,非实际执行日期): {default_exec_date}")
     
     #############################################
     # 准备阶段: 检查并创建执行计划
@@ -528,6 +1006,7 @@ with DAG(
                 script_type = script.get("script_type", "python")
                 script_exec_mode = script.get("script_exec_mode", "append")
                 source_tables = script.get("source_tables", [])
+                target_table_label = script.get("target_table_label", "")
                 
                 # 使用描述性的任务ID，包含脚本名称和目标表
                 # 提取文件名
@@ -558,10 +1037,31 @@ with DAG(
                     if key in script and script[key] is not None:
                         op_kwargs[key] = script[key]
                 
+                # 根据脚本类型和目标表标签选择执行函数
+                if script_type.lower() == 'sql' and target_table_label == 'DataModel':
+                    # 使用SQL脚本执行函数
+                    logger.info(f"脚本 {script_id} 是SQL类型且目标表标签为DataModel，使用execute_sql函数执行")
+                    python_callable = execute_sql
+                elif script_type.lower() == 'python' and target_table_label == 'DataModel':
+                    # 使用Python脚本执行函数
+                    logger.info(f"脚本 {script_id} 是Python类型且目标表标签为DataModel，使用execute_python函数执行")
+                    python_callable = execute_python
+                elif script_type.lower() == 'python_script':
+                    # 使用Python脚本文件执行函数
+                    logger.info(f"脚本 {script_id} 是python_script类型，使用execute_python_script函数执行")
+                    python_callable = execute_python_script
+                else:
+                    # 默认使用Python脚本文件执行函数
+                    logger.warning(f"未识别的脚本类型 {script_type}，使用默认execute_python_script函数执行")
+                    python_callable = execute_python_script
+                    
+                # 确保target_table_label被传递
+                op_kwargs["target_table_label"] = target_table_label
+                
                 # 创建任务
                 script_task = PythonOperator(
                     task_id=task_id,
-                    python_callable=execute_script,
+                    python_callable=python_callable,
                     op_kwargs=op_kwargs,
                     retries=TASK_RETRY_CONFIG["retries"],
                     retry_delay=timedelta(minutes=TASK_RETRY_CONFIG["retry_delay_minutes"])
