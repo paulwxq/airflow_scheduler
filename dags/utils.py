@@ -8,6 +8,10 @@ from pathlib import Path
 import networkx as nx
 import os
 from airflow.exceptions import AirflowFailException
+from datetime import datetime, timedelta, date
+import functools
+import time
+import pendulum
 
 # 创建统一的日志记录器
 logger = logging.getLogger("airflow.task")
@@ -15,138 +19,109 @@ logger = logging.getLogger("airflow.task")
 def get_pg_conn():
     return psycopg2.connect(**PG_CONFIG)
 
-def get_subscribed_tables(freq: str) -> list[dict]:
-    """
-    根据调度频率获取启用的订阅表列表，附带 execution_mode 参数
-    返回结果示例：
-    [
-        {'table_name': 'region_sales', 'execution_mode': 'append'},
-        {'table_name': 'catalog_sales', 'execution_mode': 'full_refresh'}
-    ]
-    """
-    conn = get_pg_conn()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT table_name, execution_mode 
-        FROM table_schedule 
-        WHERE is_enabled = TRUE AND schedule_frequency = %s
-    """, (freq,))
-    result = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return [{"table_name": r[0], "execution_mode": r[1]} for r in result]
 
 
-def get_neo4j_dependencies(table_name: str) -> list:
+def execute_script(script_name=None, table_name=None, execution_mode=None, script_path=None, script_exec_mode=None, args=None):
     """
-    查询 Neo4j 中某个模型的 DERIVED_FROM 依赖（上游表名）
-    """
-    uri = NEO4J_CONFIG['uri']
-    auth = (NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
-    driver = GraphDatabase.driver(uri, auth=auth)
-    query = """
-        MATCH (a:Table {name: $name})<-[:DERIVED_FROM]-(b:Table)
-        RETURN b.name
-    """
-    with driver.session() as session:
-        records = session.run(query, name=table_name)
-        return [record["b.name"] for record in records]
-
-# def get_script_name_from_neo4j(table_name: str) -> str:
-#     """
-#     从Neo4j数据库中查询表对应的脚本名称
-#     查询的是 DataResource 和 DataSource 之间的 ORIGINATES_FROM 关系中的 script_name 属性
-    
-#     参数:
-#         table_name (str): 数据资源表名
+    根据脚本名称动态导入并执行对应的脚本
+    支持两种调用方式:
+    1. execute_script(script_name, table_name, execution_mode) - 原始实现
+    2. execute_script(script_path, script_name, script_exec_mode, args={}) - 来自common.py的实现
         
-#     返回:
-#         str: 脚本名称，如果未找到则返回None
-#     """
-#     logger = logging.getLogger("airflow.task")
-    
-#     driver = GraphDatabase.driver(**NEO4J_CONFIG)
-#     query = """
-#         MATCH (dr:DataResource {en_name: $table_name})-[rel:ORIGINATES_FROM]->(ds:DataSource)
-#         RETURN rel.script_name AS script_name
-#     """
-#     try:
-#         with driver.session() as session:
-#             result = session.run(query, table_name=table_name)
-#             record = result.single()
-#             if record and 'script_name' in record:
-#                 return record['script_name']
-#             else:
-#                 logger.warning(f"没有找到表 {table_name} 对应的脚本名称")
-#                 return None
-#     except Exception as e:
-#         logger.error(f"从Neo4j查询脚本名称时出错: {str(e)}")
-#         return None
-#     finally:
-#         driver.close()
-
-def execute_script(script_name: str, table_name: str, execution_mode: str) -> bool:
-    """
-    根据脚本名称动态导入并执行对应的脚本        
     返回:
         bool: 执行成功返回True，否则返回False
     """
-    if not script_name:
-        logger.error("未提供脚本名称，无法执行")
-        return False
-    
-    try:
-        # 直接使用配置的部署路径，不考虑本地开发路径
-        script_path = Path(SCRIPTS_BASE_PATH) / script_name
-        logger.info(f"使用配置的Airflow部署路径: {script_path}")
-        
-        # 动态导入模块
-        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        
-        # 使用标准入口函数run
-        if hasattr(module, "run"):
-            logger.info(f"执行脚本 {script_name} 的标准入口函数 run()")
-            module.run(table_name=table_name, execution_mode=execution_mode)
-            return True
-        else:
-            logger.warning(f"脚本 {script_name} 未定义标准入口函数 run()，无法执行")
+    # 第一种调用方式 - 原始函数实现
+    if script_name and table_name and execution_mode is not None and script_path is None and script_exec_mode is None:
+        if not script_name:
+            logger.error("未提供脚本名称，无法执行")
             return False
-    except Exception as e:
-        logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
-        return False
+        
+        try:
+            # 直接使用配置的部署路径，不考虑本地开发路径
+            script_path = Path(SCRIPTS_BASE_PATH) / script_name
+            logger.info(f"使用配置的Airflow部署路径: {script_path}")
+            
+            # 动态导入模块
+            spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            # 使用标准入口函数run
+            if hasattr(module, "run"):
+                logger.info(f"执行脚本 {script_name} 的标准入口函数 run()")
+                module.run(table_name=table_name, execution_mode=execution_mode)
+                return True
+            else:
+                logger.warning(f"脚本 {script_name} 未定义标准入口函数 run()，无法执行")
+                return False
+        except Exception as e:
+            logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
+            return False
+    
+    # 第二种调用方式 - 从common.py迁移的实现
+    else:
+        # 确定调用方式并统一参数
+        if script_path and script_name and script_exec_mode is not None:
+            # 第二种调用方式 - 显式提供所有参数
+            if args is None:
+                args = {}
+        elif script_name and table_name and execution_mode is not None:
+            # 第二种调用方式 - 但使用第一种调用方式的参数名
+            script_path = os.path.join(SCRIPTS_BASE_PATH, f"{script_name}.py")
+            script_exec_mode = execution_mode
+            args = {"table_name": table_name}
+        else:
+            logger.error("参数不正确，无法执行脚本")
+            return False
+
+        try:
+            # 确保脚本路径存在
+            if not os.path.exists(script_path):
+                logger.error(f"脚本路径 {script_path} 不存在")
+                return False
+
+            # 加载脚本模块
+            spec = importlib.util.spec_from_file_location("script_module", script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            # 检查并记录所有可用的函数
+            module_functions = [f for f in dir(module) if callable(getattr(module, f)) and not f.startswith('_')]
+            logger.debug(f"模块 {script_name} 中的可用函数: {module_functions}")
+
+            # 获取脚本的运行函数
+            if not hasattr(module, "run"):
+                logger.error(f"脚本 {script_name} 没有run函数")
+                return False
+
+            # 装饰run函数，确保返回布尔值
+            original_run = module.run
+            module.run = ensure_boolean_result(original_run)
+            
+            logger.info(f"开始执行脚本 {script_name}，执行模式: {script_exec_mode}, 参数: {args}")
+            start_time = time.time()
+            
+            # 执行脚本
+            if table_name is not None:
+                # 使用table_name参数调用
+                exec_result = module.run(table_name=table_name, execution_mode=script_exec_mode)
+            else:
+                # 使用script_exec_mode和args调用
+                exec_result = module.run(script_exec_mode, args)
+            
+            end_time = time.time()
+            duration = end_time - start_time
+            
+            logger.info(f"脚本 {script_name} 执行完成，结果: {exec_result}, 耗时: {duration:.2f}秒")
+            return exec_result
+        except Exception as e:
+            logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
 
-# def get_enabled_tables(frequency: str) -> list:
-#     conn = get_pg_conn()
-#     cursor = conn.cursor()
-#     cursor.execute("""
-#         SELECT table_name, execution_mode
-#         FROM table_schedule
-#         WHERE is_enabled = TRUE AND schedule_frequency = %s
-#     """, (frequency,))
-#     result = cursor.fetchall()
-#     cursor.close()
-#     conn.close()
-
-#     output = []
-#     for r in result:
-#         output.append({"table_name": r[0], "execution_mode": r[1]})
-#     return output
-
-# def is_data_resource_table(table_name: str) -> bool:
-#     driver = GraphDatabase.driver(NEO4J_CONFIG['uri'], auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password']))
-#     query = """
-#         MATCH (n:DataResource {en_name: $table_name}) RETURN count(n) > 0 AS exists
-#     """
-#     try:
-#         with driver.session() as session:
-#             result = session.run(query, table_name=table_name)
-#             record = result.single()
-#             return record and record["exists"]
-#     finally:
-#         driver.close()
 
 def get_resource_subscribed_tables(enabled_tables: list) -> list:
     result = []
@@ -379,26 +354,7 @@ def run_model_script(table_name, execution_mode):
         logger.error(traceback.format_exc())
         raise AirflowFailException(error_msg)
 
-# 从 Neo4j 获取指定 DataModel 表之间的依赖关系图
-# 返回值为 dict：{目标表: [上游依赖表1, 上游依赖表2, ...]}
-# def get_model_dependency_graph(table_names: list) -> dict:
-#     graph = {}
-#     uri = NEO4J_CONFIG['uri']
-#     auth = (NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
-#     driver = GraphDatabase.driver(uri, auth=auth)
-#     try:
-#         with driver.session() as session:
-#             for table_name in table_names:
-#                 query = """
-#                     MATCH (t:DataModel {en_name: $table_name})<-[:DERIVED_FROM]-(up:DataModel)
-#                     RETURN up.en_name AS upstream
-#                 """
-#                 result = session.run(query, table_name=table_name)
-#                 deps = [record['upstream'] for record in result if 'upstream' in record]
-#                 graph[table_name] = deps
-#     finally:
-#         driver.close()
-#     return graph
+
 def get_model_dependency_graph(table_names: list) -> dict:
     """
     使用networkx从Neo4j获取指定DataModel表之间的依赖关系图    
@@ -516,28 +472,39 @@ def get_model_dependency_graph(table_names: list) -> dict:
     return final_dependency_dict
 
 
-def generate_optimized_execution_order(table_names: list) -> list:
+def generate_optimized_execution_order(table_names, dependency_dict=None):
     """
-    生成优化的执行顺序，可处理循环依赖
+    生成优化的执行顺序，处理循环依赖
     
     参数:
         table_names: 表名列表
+        dependency_dict: 依赖关系字典 {表名: [依赖表1, 依赖表2, ...]}
+                        如果为None，则通过get_model_dependency_graph获取
     
     返回:
         list: 优化后的执行顺序列表
     """
-    # 创建依赖图
+    # 创建有向图
     G = nx.DiGraph()
     
     # 添加所有节点
     for table_name in table_names:
         G.add_node(table_name)
     
-    # 添加依赖边
-    dependency_dict = get_model_dependency_graph(table_names)
-    for target, upstreams in dependency_dict.items():
-        for upstream in upstreams:
-            G.add_edge(upstream, target)
+    # 获取依赖关系
+    if dependency_dict is None:
+        # 使用原始utils.py的get_model_dependency_graph获取依赖
+        dependency_dict = get_model_dependency_graph(table_names)
+        # 添加依赖边 - 从上游指向目标
+        for target, upstreams in dependency_dict.items():
+            for upstream in upstreams:
+                G.add_edge(upstream, target)
+    else:
+        # 使用提供的dependency_dict - 从依赖指向目标
+        for target, sources in dependency_dict.items():
+            for source in sources:
+                if source in table_names:  # 确保只考虑目标表集合中的表
+                    G.add_edge(source, target)
     
     # 检测循环依赖
     cycles = list(nx.simple_cycles(G))
@@ -558,64 +525,6 @@ def generate_optimized_execution_order(table_names: list) -> list:
         # 返回原始列表作为备选
         return table_names
 
-
-
-def identify_common_paths(table_names: list) -> dict:
-    """
-    识别多个表之间的公共执行路径
-    
-    参数:
-        table_names: 表名列表
-    
-    返回:
-        dict: 公共路径信息 {(path_tuple): 使用次数}
-    """
-    # 创建依赖图
-    G = nx.DiGraph()
-    
-    # 添加所有节点和直接依赖边
-    dependency_dict = get_model_dependency_graph(table_names)
-    for target, upstreams in dependency_dict.items():
-        G.add_node(target)
-        for upstream in upstreams:
-            G.add_node(upstream)
-            G.add_edge(upstream, target)
-    
-    # 找出所有路径
-    all_paths = []
-    # 找出所有源节点（没有入边的节点）和终节点（没有出边的节点）
-    sources = [n for n in G.nodes() if G.in_degree(n) == 0]
-    targets = [n for n in G.nodes() if G.out_degree(n) == 0]
-    
-    # 获取所有源到目标的路径
-    for source in sources:
-        for target in targets:
-            try:
-                # 限制路径长度，避免组合爆炸
-                paths = list(nx.all_simple_paths(G, source, target, cutoff=10))
-                all_paths.extend(paths)
-            except nx.NetworkXNoPath:
-                continue
-    
-    # 统计路径段使用频率
-    path_segments = {}
-    for path in all_paths:
-        # 只考虑长度>=2的路径段（至少有一条边）
-        for i in range(len(path)-1):
-            for j in range(i+2, min(i+6, len(path)+1)):  # 限制段长，避免组合爆炸
-                segment = tuple(path[i:j])
-                if segment not in path_segments:
-                    path_segments[segment] = 0
-                path_segments[segment] += 1
-    
-    # 过滤出重复使用的路径段
-    common_paths = {seg: count for seg, count in path_segments.items() 
-                    if count > 1 and len(seg) >= 3}  # 至少3个节点，2条边
-    
-    # 按使用次数排序
-    common_paths = dict(sorted(common_paths.items(), key=lambda x: x[1], reverse=True))
-    
-    return common_paths
 
 def check_table_relationship(table1, table2):
     """
@@ -844,46 +753,283 @@ def connect_start_and_end_tasks(task_dict, tasks_with_upstream, tasks_with_downs
     return start_tasks, end_tasks
 
 
-def process_model_tables(enabled_tables, dag_type, wait_task, completed_task, dag, **task_options):
-    """
-    处理模型表并构建DAG
+def get_neo4j_driver():
+    """获取Neo4j连接驱动"""
+    uri = NEO4J_CONFIG['uri']
+    auth = (NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
+    return GraphDatabase.driver(uri, auth=auth)
+
+def update_task_start_time(exec_date, target_table, script_name, start_time):
+    """更新任务开始时间"""
+    logger.info(f"===== 更新任务开始时间 =====")
+    logger.info(f"参数: exec_date={exec_date} ({type(exec_date).__name__}), target_table={target_table}, script_name={script_name}")
     
-    参数:
-        enabled_tables: 已启用的表列表
-        dag_type: DAG类型 (daily, monthly等)
-        wait_task: 等待任务
-        completed_task: 完成标记任务
-        dag: Airflow DAG对象
-        task_options: 创建任务的额外选项
-    """
-    model_tables = [t for t in enabled_tables if is_data_model_table(t['table_name'])]
-    logger.info(f"获取到 {len(model_tables)} 个启用的 {dag_type} 模型表")
+    conn = get_pg_conn()
+    cursor = conn.cursor()
+    try:
+        # 首先检查记录是否存在
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM airflow_dag_schedule 
+            WHERE exec_date = %s AND target_table = %s AND script_name = %s
+        """, (exec_date, target_table, script_name))
+        count = cursor.fetchone()[0]
+        logger.info(f"查询到符合条件的记录数: {count}")
+        
+        if count == 0:
+            logger.warning(f"未找到匹配的记录: exec_date={exec_date}, target_table={target_table}, script_name={script_name}")
+            logger.info("尝试记录在airflow_dag_schedule表中找到的记录:")
+            cursor.execute("""
+                SELECT exec_date, target_table, script_name
+                FROM airflow_dag_schedule
+                LIMIT 5
+            """)
+            sample_records = cursor.fetchall()
+            for record in sample_records:
+                logger.info(f"样本记录: exec_date={record[0]} ({type(record[0]).__name__}), target_table={record[1]}, script_name={record[2]}")
+        
+        # 执行更新
+        sql = """
+            UPDATE airflow_dag_schedule 
+            SET exec_start_time = %s
+            WHERE exec_date = %s AND target_table = %s AND script_name = %s
+        """
+        logger.info(f"执行SQL: {sql}")
+        logger.info(f"参数: start_time={start_time}, exec_date={exec_date}, target_table={target_table}, script_name={script_name}")
+        
+        cursor.execute(sql, (start_time, exec_date, target_table, script_name))
+        affected_rows = cursor.rowcount
+        logger.info(f"更新影响的行数: {affected_rows}")
+        
+        conn.commit()
+        logger.info("事务已提交")
+    except Exception as e:
+        logger.error(f"更新任务开始时间失败: {str(e)}")
+        import traceback
+        logger.error(f"错误堆栈: {traceback.format_exc()}")
+        conn.rollback()
+        logger.info("事务已回滚")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+        logger.info("数据库连接已关闭")
+        logger.info("===== 更新任务开始时间完成 =====")
+
+def update_task_completion(exec_date, target_table, script_name, success, end_time, duration):
+    """更新任务完成信息"""
+    logger.info(f"===== 更新任务完成信息 =====")
+    logger.info(f"参数: exec_date={exec_date} ({type(exec_date).__name__}), target_table={target_table}, script_name={script_name}")
+    logger.info(f"参数: success={success} ({type(success).__name__}), end_time={end_time}, duration={duration}")
     
-    if not model_tables:
-        # 如果没有模型表需要处理，直接将等待任务与完成标记相连接
-        logger.info(f"没有找到需要处理的{dag_type}模型表，DAG将直接标记为完成")
-        wait_task >> completed_task
-        return
+    conn = get_pg_conn()
+    cursor = conn.cursor()
+    try:
+        # 首先检查记录是否存在
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM airflow_dag_schedule 
+            WHERE exec_date = %s AND target_table = %s AND script_name = %s
+        """, (exec_date, target_table, script_name))
+        count = cursor.fetchone()[0]
+        logger.info(f"查询到符合条件的记录数: {count}")
+        
+        if count == 0:
+            logger.warning(f"未找到匹配的记录: exec_date={exec_date}, target_table={target_table}, script_name={script_name}")
+            # 查询表中前几条记录作为参考
+            cursor.execute("""
+                SELECT exec_date, target_table, script_name
+                FROM airflow_dag_schedule
+                LIMIT 5
+            """)
+            sample_records = cursor.fetchall()
+            logger.info("airflow_dag_schedule表中的样本记录:")
+            for record in sample_records:
+                logger.info(f"样本记录: exec_date={record[0]} ({type(record[0]).__name__}), target_table={record[1]}, script_name={record[2]}")
+        
+        # 确保success是布尔类型
+        if not isinstance(success, bool):
+            original_success = success
+            success = bool(success)
+            logger.warning(f"success参数不是布尔类型，原始值: {original_success}，转换为: {success}")
+        
+        # 执行更新
+        sql = """
+            UPDATE airflow_dag_schedule 
+            SET exec_result = %s, exec_end_time = %s, exec_duration = %s
+            WHERE exec_date = %s AND target_table = %s AND script_name = %s
+        """
+        logger.info(f"执行SQL: {sql}")
+        logger.info(f"参数: success={success}, end_time={end_time}, duration={duration}, exec_date={exec_date}, target_table={target_table}, script_name={script_name}")
+        
+        cursor.execute(sql, (success, end_time, duration, exec_date, target_table, script_name))
+        affected_rows = cursor.rowcount
+        logger.info(f"更新影响的行数: {affected_rows}")
+        
+        if affected_rows == 0:
+            logger.warning("更新操作没有影响任何行，可能是因为条件不匹配")
+            # 尝试用不同格式的exec_date查询
+            if isinstance(exec_date, str):
+                try:
+                    # 尝试解析日期字符串
+                    from datetime import datetime
+                    parsed_date = datetime.strptime(exec_date, "%Y-%m-%d").date()
+                    logger.info(f"尝试使用解析后的日期格式: {parsed_date}")
+                    
+                    cursor.execute("""
+                        SELECT COUNT(*) 
+                        FROM airflow_dag_schedule 
+                        WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                    """, (parsed_date, target_table, script_name))
+                    parsed_count = cursor.fetchone()[0]
+                    logger.info(f"使用解析日期后查询到的记录数: {parsed_count}")
+                    
+                    if parsed_count > 0:
+                        # 尝试用解析的日期更新
+                        cursor.execute("""
+                            UPDATE airflow_dag_schedule 
+                            SET exec_result = %s, exec_end_time = %s, exec_duration = %s
+                            WHERE exec_date = %s AND target_table = %s AND script_name = %s
+                        """, (success, end_time, duration, parsed_date, target_table, script_name))
+                        new_affected_rows = cursor.rowcount
+                        logger.info(f"使用解析日期后更新影响的行数: {new_affected_rows}")
+                except Exception as parse_e:
+                    logger.error(f"尝试解析日期格式时出错: {str(parse_e)}")
+        
+        conn.commit()
+        logger.info("事务已提交")
+    except Exception as e:
+        logger.error(f"更新任务完成信息失败: {str(e)}")
+        import traceback
+        logger.error(f"错误堆栈: {traceback.format_exc()}")
+        conn.rollback()
+        logger.info("事务已回滚")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+        logger.info("数据库连接已关闭")
+        logger.info("===== 更新任务完成信息完成 =====")
+
+def execute_with_monitoring(target_table, script_name, script_exec_mode, exec_date, **kwargs):
+    """执行脚本并监控执行情况"""
+
+    # 添加详细日志
+    logger.info(f"===== 开始监控执行 =====")
+    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
+    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
+    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
+    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
+
+    # 检查script_name是否为空
+    if not script_name:
+        logger.error(f"表 {target_table} 的script_name为空，无法执行")
+        # 记录执行失败
+        now = datetime.now()
+        update_task_completion(exec_date, target_table, script_name or "", False, now, 0)
+        return False
+    # 记录执行开始时间
+    start_time = datetime.now()
     
-    # 获取表名列表
-    table_names = [t['table_name'] for t in model_tables]
+    # 尝试更新开始时间并记录结果
+    try:
+        update_task_start_time(exec_date, target_table, script_name, start_time)
+        logger.info(f"成功更新任务开始时间: {start_time}")
+    except Exception as e:
+        logger.error(f"更新任务开始时间失败: {str(e)}")
     
     try:
-        # 构建模型依赖DAG
-        optimized_table_order, dependency_graph = build_model_dependency_dag(table_names, model_tables)
+        # 执行实际脚本
+        logger.info(f"开始执行脚本: {script_name}")
+        result = execute_script(script_name, target_table, script_exec_mode)
+        logger.info(f"脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
         
-        # 创建任务字典
-        task_dict = create_task_dict(optimized_table_order, model_tables, dag, dag_type, **task_options)
+        # 确保result是布尔值
+        if result is None:
+            logger.warning(f"脚本返回值为None，转换为False")
+            result = False
+        elif not isinstance(result, bool):
+            original_result = result
+            result = bool(result)
+            logger.warning(f"脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
         
-        # 建立任务依赖关系
-        tasks_with_upstream, tasks_with_downstream, _ = build_task_dependencies(task_dict, dependency_graph)
+        # 记录结束时间和结果
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
         
-        # 连接开始节点和末端节点
-        connect_start_and_end_tasks(task_dict, tasks_with_upstream, tasks_with_downstream, 
-                                  wait_task, completed_task, dag_type)
+        # 尝试更新完成状态并记录结果
+        try:
+            logger.info(f"尝试更新完成状态: result={result}, end_time={end_time}, duration={duration}")
+            update_task_completion(exec_date, target_table, script_name, result, end_time, duration)
+            logger.info(f"成功更新任务完成状态，结果: {result}")
+        except Exception as e:
+            logger.error(f"更新任务完成状态失败: {str(e)}")
         
+        logger.info(f"===== 监控执行完成 =====")
+        return result
     except Exception as e:
-        logger.error(f"处理{dag_type}模型表时出错: {str(e)}")
-        # 出错时也要确保完成标记被触发
-        wait_task >> completed_task
-        raise
+        # 处理异常
+        logger.error(f"执行任务出错: {str(e)}")
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        # 尝试更新失败状态并记录结果
+        try:
+            logger.info(f"尝试更新失败状态: end_time={end_time}, duration={duration}")
+            update_task_completion(exec_date, target_table, script_name, False, end_time, duration)
+            logger.info(f"成功更新任务失败状态")
+        except Exception as update_e:
+            logger.error(f"更新任务失败状态失败: {str(update_e)}")
+        
+        logger.info(f"===== 监控执行异常结束 =====")
+        raise e
+
+def ensure_boolean_result(func):
+    """装饰器：确保函数返回布尔值"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            result = func(*args, **kwargs)
+            logger.debug(f"脚本原始返回值: {result} (类型: {type(result).__name__})")
+            
+            # 处理None值
+            if result is None:
+                logger.warning(f"脚本函数 {func.__name__} 返回了None，默认设置为False")
+                return False
+                
+            # 处理非布尔值
+            if not isinstance(result, bool):
+                try:
+                    # 尝试转换为布尔值
+                    bool_result = bool(result)
+                    logger.warning(f"脚本函数 {func.__name__} 返回非布尔值 {result}，已转换为布尔值 {bool_result}")
+                    return bool_result
+                except Exception as e:
+                    logger.error(f"无法将脚本返回值 {result} 转换为布尔值: {str(e)}")
+                    return False
+            
+            return result
+        except Exception as e:
+            logger.error(f"脚本函数 {func.__name__} 执行出错: {str(e)}")
+            return False
+    return wrapper
+
+def get_today_date():
+    """获取今天的日期，返回YYYY-MM-DD格式字符串"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+def get_cn_exec_date(logical_date):
+    """
+    获取逻辑执行日期
+    
+    参数:
+        logical_date: 逻辑执行日期，UTC时间
+
+    返回:
+        logical_exec_date: 逻辑执行日期，北京时间
+        local_logical_date: 北京时区的logical_date
+    """
+    # 获取逻辑执行日期
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    exec_date = local_logical_date.strftime('%Y-%m-%d')
+    return exec_date, local_logical_date

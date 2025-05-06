@@ -18,10 +18,11 @@ import json
 import os
 import pendulum
 from decimal import Decimal
-from common import (
+from utils import (
     get_pg_conn, 
     get_neo4j_driver,
-    get_today_date
+    get_today_date,
+    get_cn_exec_date
 )
 from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG
 import pytz
@@ -66,23 +67,6 @@ class DecimalEncoder(json.JSONEncoder):
         # 让父类处理其他类型
         return super(DecimalEncoder, self).default(obj)
     
-
-def get_cn_exec_date(logical_date):
-    """
-    获取逻辑执行日期
-    
-    参数:
-        logical_date: 逻辑执行日期，UTC时间
-
-    返回:
-        logical_exec_date: 逻辑执行日期，北京时间
-        local_logical_date: 北京时区的logical_date
-    """
-    # 获取逻辑执行日期
-    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
-    exec_date = local_logical_date.strftime('%Y-%m-%d')
-    return exec_date, local_logical_date
-
 
 #############################################
 # 脚本执行函数

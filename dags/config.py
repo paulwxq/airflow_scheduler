@@ -32,7 +32,7 @@ TASK_RETRY_CONFIG = {
 # 脚本文件基础路径配置
 # 部署到 Airflow 环境时使用此路径
 AIRFLOW_BASE_PATH='/opt/airflow'
-SCRIPTS_BASE_PATH = "/opt/airflow/dataops/scripts"
+SCRIPTS_BASE_PATH = "/opt/airflow/dataops_scripts"
 
 # 上传的CSV/EXCEL文件的基准上传路径
 STRUCTURE_UPLOAD_BASE_PATH ="/data/csv"

@@ -66,6 +66,7 @@ from config import NEO4J_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG
 import traceback
 import pendulum
 import pytz
+from utils import get_pg_conn, get_cn_exec_date, check_script_exists
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -80,26 +81,6 @@ default_args = {
     'retries': 1,
     'retry_delay': timedelta(minutes=1),
 }
-
-def get_cn_exec_date(logical_date):
-    """
-    获取逻辑执行日期
-    
-    参数:
-        logical_date: 逻辑执行日期，UTC时间
-
-    返回:
-        logical_exec_date: 逻辑执行日期，北京时间
-        local_logical_date: 北京时区的logical_date
-    """
-    # 获取逻辑执行日期
-    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
-    exec_date = local_logical_date.strftime('%Y-%m-%d')
-    return exec_date, local_logical_date
-
-def get_pg_conn():
-    """获取PostgreSQL连接"""
-    return psycopg2.connect(**PG_CONFIG)
 
 def get_execution_mode(table_name):
     """
@@ -721,16 +702,6 @@ def get_upstream_script_dependencies(script_info, dependency_level='resource'):
         
         # 出错时，至少返回当前脚本
         return [script_info]
-
-def check_script_exists(script_name):
-    """检查脚本文件是否存在"""
-    script_path = os.path.join(SCRIPTS_BASE_PATH, script_name)
-    if os.path.exists(script_path):
-        logger.info(f"脚本文件存在: {script_path}")
-        return True, script_path
-    else:
-        logger.error(f"脚本文件不存在: {script_path}")
-        return False, script_path
 
 def execute_python_script(script_info):
     """

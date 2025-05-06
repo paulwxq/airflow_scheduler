@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# 这是dataops_scripts目录下的文件 - 用于验证路径修改成功
 import logging
 import sys
 from datetime import datetime, timedelta

@@ -19,7 +19,7 @@ from airflow.models import DagRun, TaskInstance
 from airflow.utils.state import State
 from sqlalchemy import desc
 from airflow import settings
-from common import get_today_date
+from utils import get_today_date
 from decimal import Decimal
 
 # 创建日志记录器
