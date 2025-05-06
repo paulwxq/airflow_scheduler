@@ -1,5 +1,7 @@
 # config.py
 
+import os
+
 # PostgreSQL 连接信息
 PG_CONFIG = {
     "host": "localhost",
@@ -32,7 +34,8 @@ TASK_RETRY_CONFIG = {
 # 脚本文件基础路径配置
 # 部署到 Airflow 环境时使用此路径
 AIRFLOW_BASE_PATH='/opt/airflow'
-SCRIPTS_BASE_PATH = "/opt/airflow/dataops_scripts"
+DATAOPS_DAGS_PATH = os.path.join(AIRFLOW_BASE_PATH, 'dags')
+SCRIPTS_BASE_PATH = os.path.join(AIRFLOW_BASE_PATH, 'dataops_scripts')
 
 # 上传的CSV/EXCEL文件的基准上传路径
 STRUCTURE_UPLOAD_BASE_PATH ="/data/csv"

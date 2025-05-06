@@ -26,13 +26,6 @@ def load_data_from_source(source_name="default", execution_date=None, execution_
     if script_name is None:
         script_name = os.path.basename(__file__)
     
-    # 使用print输出所有参数
-    print(f"===== 参数信息 (print输出) =====")
-    print(f"table_name: {source_name}")
-    print(f"exec_date: {execution_date}")
-    print(f"execution_mode: {execution_mode}")
-    print(f"script_name: {script_name}")
-    print(f"================================")
     
     # 使用logger.info输出所有参数
     logger.info(f"===== 参数信息 (logger输出) =====")

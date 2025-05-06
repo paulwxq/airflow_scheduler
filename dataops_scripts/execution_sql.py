@@ -36,7 +36,7 @@ except ImportError as e:
     # 尝试备用方法1：完整路径导入
     try:
         sys.path.append(os.path.dirname(current_dir))  # 添加父目录
-        import dataops.scripts.script_utils as script_utils
+        import dataops_scripts.script_utils as script_utils
         logger.info("使用完整路径成功导入script_utils模块")
     except ImportError as e2:
         logger.error(f"使用完整路径导入失败: {str(e2)}")

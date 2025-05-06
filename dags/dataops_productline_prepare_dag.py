@@ -2,6 +2,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.models import Variable
 from datetime import datetime, timedelta
 import logging
 import networkx as nx
@@ -17,7 +18,7 @@ from utils import (
     get_neo4j_driver,
     get_today_date
 )
-from config import PG_CONFIG, NEO4J_CONFIG
+from config import PG_CONFIG, NEO4J_CONFIG, DATAOPS_DAGS_PATH
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -1022,6 +1023,19 @@ def optimize_script_execution_order(scripts, script_dependencies, G):
         # 出错时返回原始脚本ID列表，不进行优化
         return [script['script_id'] for script in scripts] 
 
+def set_dataops_dags_path_variable():
+    """
+    将DATAOPS_DAGS_PATH设置为Airflow变量
+    """
+    try:
+        # 从config中获取DATAOPS_DAGS_PATH值
+        Variable.set("DATAOPS_DAGS_PATH", DATAOPS_DAGS_PATH)
+        logger.info(f"已成功设置Airflow变量DATAOPS_DAGS_PATH为: {DATAOPS_DAGS_PATH}")
+        return True
+    except Exception as e:
+        logger.error(f"设置Airflow变量DATAOPS_DAGS_PATH失败: {str(e)}")
+        return False
+
 def prepare_productline_dag_schedule(**kwargs):
     """准备产品线DAG调度任务的主函数"""
     # 添加更严格的异常处理
@@ -1286,6 +1300,9 @@ def prepare_productline_dag_schedule(**kwargs):
                     logger.info("执行计划已成功保存到数据库")
                 else:
                     raise Exception("执行计划保存到数据库失败")
+                
+                # 13. 设置Airflow变量DATAOPS_DAGS_PATH
+                set_dataops_dags_path_variable()
                 
             except Exception as db_e:
                 # 捕获数据库保存错误
