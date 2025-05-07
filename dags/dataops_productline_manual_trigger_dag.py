@@ -496,9 +496,10 @@ def execute_python_script(script_info):
     update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
     source_tables = script_info.get('source_tables', [])
-    frequency = script_info.get('frequency', 'daily')
+    schedule_frequency = script_info.get('schedule_frequency', 'daily')
     # 使用传入的执行日期，如果不存在则使用当前日期
     exec_date = script_info.get('exec_date', datetime.now().strftime('%Y-%m-%d'))
+    is_manual_dag_trigger = script_info.get('is_manual_dag_trigger', False)  # 获取手动DAG触发标识
     
     # 记录开始执行
     logger.info(f"===== 开始执行物理Python脚本文件: {script_name} =====")
@@ -506,8 +507,9 @@ def execute_python_script(script_info):
     logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
     logger.info(f"源表: {source_tables}")
-    logger.info(f"频率: {frequency}")
+    logger.info(f"频率: {schedule_frequency}")
     logger.info(f"执行日期: {exec_date}")
+    logger.info(f"是否手工DAG触发: {is_manual_dag_trigger}")
     
     # 检查脚本文件是否存在
     exists, script_path = check_script_exists(script_name)
@@ -531,8 +533,9 @@ def execute_python_script(script_info):
             run_kwargs = {
                 "table_name": target_table,
                 "update_mode": update_mode,
-                "frequency": frequency,
-                "exec_date": exec_date  # 使用传入的执行日期而不是当前日期
+                "schedule_frequency": schedule_frequency,
+                "exec_date": exec_date,  # 使用传入的执行日期而不是当前日期
+                "is_manual_dag_trigger": is_manual_dag_trigger  # 添加手动DAG触发标识
             }
             
             # 如果是structure类型，添加特殊参数
@@ -580,7 +583,8 @@ def execute_sql(script_info):
     target_table = script_info.get('target_table')
     update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
-    frequency = script_info.get('frequency', 'daily')
+    schedule_frequency = script_info.get('schedule_frequency', 'daily')
+    is_manual_dag_trigger = script_info.get('is_manual_dag_trigger', False)
     # 使用传入的执行日期，如果不存在则使用当前日期
     exec_date = script_info.get('exec_date', datetime.now().strftime('%Y-%m-%d'))
     
@@ -589,8 +593,9 @@ def execute_sql(script_info):
     logger.info(f"目标表: {target_table}")
     logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
-    logger.info(f"频率: {frequency}")
+    logger.info(f"频率: {schedule_frequency}")
     logger.info(f"执行日期: {exec_date}")
+    logger.info(f"是否手工DAG触发: {is_manual_dag_trigger}")
     
     try:
         # 记录执行开始时间
@@ -617,9 +622,10 @@ def execute_sql(script_info):
                 "target_table": target_table,
                 "script_name": script_name,
                 "exec_date": exec_date,  # 使用传入的执行日期而不是当前日期
-                "frequency": frequency,
+                "schedule_frequency": schedule_frequency,
                 "target_table_label": target_table_label,
-                "update_mode": update_mode
+                "update_mode": update_mode,
+                "is_manual_dag_trigger": is_manual_dag_trigger
             }
             
             # 如果是structure类型，添加特殊参数
@@ -667,7 +673,8 @@ def execute_python(script_info):
     target_table = script_info.get('target_table')
     update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
-    frequency = script_info.get('frequency', 'daily')
+    schedule_frequency = script_info.get('schedule_frequency', 'daily')
+    is_manual_dag_trigger = script_info.get('is_manual_dag_trigger', False)
     # 使用传入的执行日期，如果不存在则使用当前日期
     exec_date = script_info.get('exec_date', datetime.now().strftime('%Y-%m-%d'))
     
@@ -676,8 +683,9 @@ def execute_python(script_info):
     logger.info(f"目标表: {target_table}")
     logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
-    logger.info(f"频率: {frequency}")
+    logger.info(f"频率: {schedule_frequency}")
     logger.info(f"执行日期: {exec_date}")
+    logger.info(f"是否手工DAG触发: {is_manual_dag_trigger}")
     
     try:
         # 记录执行开始时间
@@ -704,9 +712,10 @@ def execute_python(script_info):
                 "target_table": target_table,
                 "script_name": script_name,
                 "exec_date": exec_date,  # 使用传入的执行日期而不是当前日期
-                "frequency": frequency,
+                "schedule_frequency": schedule_frequency,
                 "target_table_label": target_table_label,
-                "update_mode": update_mode
+                "update_mode": update_mode,
+                "is_manual_dag_trigger": is_manual_dag_trigger
             }
             
             # 如果是structure类型，添加特殊参数
@@ -750,7 +759,7 @@ def choose_executor(script_info):
     返回:
         function: 执行函数
     """
-    script_type = script_info.get('script_type', 'python_script').lower()
+    script_type = script_info.get('script_type').lower()
     target_table_label = script_info.get('target_table_label')
     
     # 根据脚本类型和目标表标签选择执行函数
@@ -792,14 +801,14 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
     
     # 情况1: 同时提供脚本名称和目标表名
     if script_name and target_table:
-        logger.info(f"方案1: 同时提供了脚本名称和目标表名")
+        logger.info(f"情况1: 同时提供了脚本名称和目标表名")
         script_info = get_complete_script_info(script_name, target_table)
         if script_info:
             all_script_infos.append(script_info)
     
     # 情况2: 只提供脚本名称，自动查找目标表
     elif script_name and not target_table:
-        logger.info(f"方案2: 只提供了脚本名称，自动查找目标表")
+        logger.info(f"情况2: 只提供了脚本名称，自动查找目标表")
         target_table = find_target_table_for_script(script_name)
         if target_table:
             logger.info(f"找到脚本 {script_name} 对应的目标表: {target_table}")
@@ -811,7 +820,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
     
     # 情况3: 只提供目标表名，查找并处理相关的脚本
     elif not script_name and target_table:
-        logger.info(f"方案3: 只提供了目标表名，查找相关的脚本")
+        logger.info(f"情况3: 只提供了目标表名，查找相关的脚本")
         
         # 首先检查是否为structure类型的DataResource表
         table_label = get_table_label(target_table)
@@ -942,6 +951,7 @@ def execute_script_chain(**context):
     """
     执行依赖链中的所有脚本
     """
+      
     # 获取依赖链和执行日期
     ti = context['ti']
     dependency_chain = ti.xcom_pull(task_ids='prepare_dependency_chain', key='dependency_chain')
@@ -975,7 +985,7 @@ def execute_script_chain(**context):
     for idx, script_info in enumerate(dependency_chain, 1):
         script_name = script_info['script_name']
         target_table = script_info['target_table']
-        script_type = script_info.get('script_type', 'python_script')
+        script_type = script_info.get('script_type')
         
         logger.info(f"===== 执行脚本 {idx}/{len(dependency_chain)}: {script_name} -> {target_table} (类型: {script_type}) =====")
         
@@ -985,7 +995,9 @@ def execute_script_chain(**context):
         # 将执行日期添加到脚本信息中
         script_info['exec_date'] = exec_date
         script_info['logical_date'] = logical_date
-        
+
+        # 这个参数用来标识脚本是不是被手工DAG触发的，它会影响脚本执行之前的幂等性操作。
+        script_info['is_manual_dag_trigger'] = True
         # 执行脚本
         success = executor(script_info)
         
@@ -1035,7 +1047,7 @@ def generate_execution_report(**context):
     # 统计不同类型脚本数量
     script_types = {}
     for result in results:
-        script_type = result.get('script_type', 'python_script')
+        script_type = result.get('script_type')
         if script_type not in script_types:
             script_types[script_type] = 0
         script_types[script_type] += 1
@@ -1059,7 +1071,7 @@ def generate_execution_report(**context):
     for idx, result in enumerate(results, 1):
         script_name = result['script_name']
         target_table = result['target_table']
-        script_type = result.get('script_type', 'python_script')
+        script_type = result.get('script_type')
         success = result['success']
         status = "✓ 成功" if success else "✗ 失败"
         report.append(f"{idx}. {script_name} -> {target_table} ({script_type}): {status}")
@@ -1104,6 +1116,7 @@ with DAG(
         task_id='execute_script_chain',
         python_callable=execute_script_chain,
         provide_context=True,
+        trigger_rule='all_success'  # 修改为仅在上游任务成功时执行
     )
     
     # 任务3: 生成执行报告

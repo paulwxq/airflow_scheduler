@@ -35,27 +35,27 @@ except ImportError as e:
     logger.error(f"无法直接导入script_utils方法: {str(e)}")
     
     # 尝试备用方法1：完整路径导入
-    try:
-        sys.path.append(os.path.dirname(current_dir))  # 添加父目录
-        from dataops_scripts.script_utils import get_pg_config
-        logger.info("使用完整路径成功导入script_utils模块的方法")
-    except ImportError as e2:
-        logger.error(f"使用完整路径导入失败: {str(e2)}")
+    # try:
+    #     sys.path.append(os.path.dirname(current_dir))  # 添加父目录
+    #     from dataops_scripts.script_utils import get_pg_config
+    #     logger.info("使用完整路径成功导入script_utils模块的方法")
+    # except ImportError as e2:
+    #     logger.error(f"使用完整路径导入失败: {str(e2)}")
         
-        # 尝试备用方法2：动态导入
-        try:
-            import importlib.util
-            script_utils_path = os.path.join(current_dir, "script_utils.py")
-            logger.info(f"尝试从路径动态导入: {script_utils_path}")
+    #     # 尝试备用方法2：动态导入
+    #     try:
+    #         import importlib.util
+    #         script_utils_path = os.path.join(current_dir, "script_utils.py")
+    #         logger.info(f"尝试从路径动态导入: {script_utils_path}")
             
-            spec = importlib.util.spec_from_file_location("script_utils", script_utils_path)
-            script_utils = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(script_utils)
-            get_pg_config = script_utils.get_pg_config
-            logger.info("通过动态导入成功加载script_utils模块的方法")
-        except Exception as e3:
-            logger.error(f"动态导入也失败: {str(e3)}")
-            raise ImportError(f"无法导入script_utils模块的方法，所有方法都失败")
+    #         spec = importlib.util.spec_from_file_location("script_utils", script_utils_path)
+    #         script_utils = importlib.util.module_from_spec(spec)
+    #         spec.loader.exec_module(script_utils)
+    #         get_pg_config = script_utils.get_pg_config
+    #         logger.info("通过动态导入成功加载script_utils模块的方法")
+    #     except Exception as e3:
+    #         logger.error(f"动态导入也失败: {str(e3)}")
+    #         raise ImportError(f"无法导入script_utils模块的方法，所有方法都失败")
 
 # 使用script_utils中的方法获取配置
 try:
@@ -235,7 +235,7 @@ def render_sql_template(sql_content, template_params):
         raise
 
 def run(script_type=None, target_table=None, script_name=None, exec_date=None, 
-        frequency=None, **kwargs):
+        schedule_frequency=None, **kwargs):
     """
     执行SQL脚本主入口函数
     
@@ -244,7 +244,7 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
         target_table (str): 目标表名
         script_name (str): 脚本名称
         exec_date (str): 执行日期，格式为YYYY-MM-DD
-        frequency (str): 频率，可选值为 daily, weekly, monthly, quarterly, yearly
+        schedule_frequency (str): 频率，可选值为 daily, weekly, monthly, quarterly, yearly
         **kwargs: 其他参数
     
     返回:
@@ -257,7 +257,7 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
     logger.info(f"目标表: {target_table}")
     logger.info(f"脚本名称: {script_name}")
     logger.info(f"执行日期: {exec_date}")
-    logger.info(f"频率: {frequency}")
+    logger.info(f"频率: {schedule_frequency}")
     
     # 记录其他参数
     for key, value in kwargs.items():
@@ -280,7 +280,7 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
         logger.error("未提供执行日期")
         return False
     
-    if not frequency:
+    if not schedule_frequency:
         logger.error("未提供频率")
         return False
     
@@ -293,26 +293,13 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
         
         logger.info(f"成功获取脚本内容，长度: {len(sql_content)} 字符")
         
-        # 计算日期范围
-        try:
-            start_date, end_date = script_utils.get_date_range(exec_date, frequency)
-            logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
-        except Exception as date_err:
-            logger.error(f"计算日期范围时出错: {str(date_err)}", exc_info=True)
-            return False
-        
-        # 准备模板参数
-        template_params = {
-            'start_date': start_date,
-            'end_date': end_date,
-            # 可以添加更多默认参数
-        }
-        
         # 检查是否开启ETL幂等性
         target_table_label = kwargs.get('target_table_label', '')
         script_exec_mode = kwargs.get('update_mode', 'append')  # 只使用update_mode
+        is_manual_dag_trigger = kwargs.get('is_manual_dag_trigger', False)  # 新增：获取是否为手动触发的DAG
         
         logger.info(f"脚本更新模式: {script_exec_mode}")
+        logger.info(f"是否手工DAG触发: {is_manual_dag_trigger}")
         
         # 导入config模块获取幂等性开关
         try:
@@ -332,42 +319,86 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
             if script_exec_mode.lower() == 'append':
                 logger.info("当前为append模式，开始考虑ETL幂等性处理")
                 
-                # 检查是否有目标日期列
-                if target_dt_column:
-                    logger.info(f"找到目标日期列 {target_dt_column}，将生成DELETE语句")
+                if is_manual_dag_trigger:
+                    logger.info("manual dag被手工触发")
+                    # 计算日期范围
+                    try:
+                        start_date, end_date = script_utils.get_date_range(exec_date, schedule_frequency)
+                        logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
+                    except Exception as date_err:
+                        logger.error(f"计算日期范围时出错: {str(date_err)}", exc_info=True)
+                        return False
                     
-                    # 生成DELETE语句
-                    delete_sql = f"""DELETE FROM {target_table}
+                    # 检查是否有目标日期列
+                    if target_dt_column:
+                        logger.info(f"找到目标日期列 {target_dt_column}，将生成DELETE语句")
+                        
+                        # 生成DELETE语句
+                        delete_sql = f"""DELETE FROM {target_table}
 WHERE {target_dt_column} >= '{{{{ start_date }}}}'
   AND {target_dt_column} < '{{{{ end_date }}}}';"""
-                    
-                    logger.info(f"生成的DELETE语句: {delete_sql}")
-                    
-                    # 渲染DELETE SQL
-                    try:
-                        rendered_delete_sql = render_sql_template(delete_sql, template_params)
-                        logger.info("成功渲染清理SQL")
-                    except Exception as render_err:
-                        logger.error(f"渲染清理SQL时出错: {str(render_err)}", exc_info=True)
-                        # 即使清理SQL失败，仍然继续执行后续SQL
-                        logger.warning("继续执行原始SQL")
-                    else:
-                        # 执行DELETE SQL
-                        logger.info("执行清理SQL以实现幂等性")
-                        delete_success, delete_result = execute_sql(rendered_delete_sql)
                         
-                        if delete_success:
-                            if isinstance(delete_result, dict) and "affected_rows" in delete_result:
-                                logger.info(f"清理SQL执行成功，删除了 {delete_result['affected_rows']} 行数据")
-                            else:
-                                logger.info("清理SQL执行成功")
-                        else:
-                            logger.error(f"清理SQL执行失败: {delete_result.get('error', '未知错误')}")
-                            # 继续执行原始SQL
+                        logger.info(f"生成的DELETE语句: {delete_sql}")
+                        
+                        # 准备模板参数
+                        template_params = {
+                            'start_date': start_date,
+                            'end_date': end_date,
+                            # 可以添加更多默认参数
+                        }
+                        
+                        # 渲染DELETE SQL
+                        try:
+                            rendered_delete_sql = render_sql_template(delete_sql, template_params)
+                            logger.info("成功渲染清理SQL")
+                        except Exception as render_err:
+                            logger.error(f"渲染清理SQL时出错: {str(render_err)}", exc_info=True)
+                            # 即使清理SQL失败，仍然继续执行后续SQL
                             logger.warning("继续执行原始SQL")
+                        else:
+                            # 执行DELETE SQL
+                            logger.info("执行清理SQL以实现幂等性")
+                            delete_success, delete_result = execute_sql(rendered_delete_sql)
+                            
+                            if delete_success:
+                                if isinstance(delete_result, dict) and "affected_rows" in delete_result:
+                                    logger.info(f"清理SQL执行成功，删除了 {delete_result['affected_rows']} 行数据")
+                                else:
+                                    logger.info("清理SQL执行成功")
+                            else:
+                                logger.error(f"清理SQL执行失败: {delete_result.get('error', '未知错误')}")
+                                # 继续执行原始SQL
+                                logger.warning("继续执行原始SQL")
+                    else:
+                        logger.warning(f"目标表 {target_table} 没有设置目标日期列(target_dt_column)，无法生成DELETE语句实现幂等性")
+                        logger.warning("将直接执行原始SQL，可能导致数据重复")
                 else:
-                    logger.warning(f"目标表 {target_table} 没有设置目标日期列(target_dt_column)，无法生成DELETE语句实现幂等性")
-                    logger.warning("将直接执行原始SQL，可能导致数据重复")
+                    logger.info(f"不是manual dag手工触发，对目标表 {target_table} create_time 进行数据清理")
+                    
+                    # 获取一天范围的日期
+                    start_date, end_date = script_utils.get_one_day_range(exec_date)
+                    logger.info(f"使用一天范围的日期: start_date={start_date}, end_date={end_date}")
+                    
+                    # 生成基于create_time的DELETE语句
+                    delete_sql = f"""DELETE FROM {target_table}
+WHERE create_time >= '{start_date}'
+  AND create_time < '{end_date}';"""
+                    
+                    logger.info(f"生成的基于create_time的DELETE语句: {delete_sql}")
+                    
+                    # 执行DELETE SQL
+                    logger.info("基于create_time执行清理SQL以实现幂等性")
+                    delete_success, delete_result = execute_sql(delete_sql)
+                    
+                    if delete_success:
+                        if isinstance(delete_result, dict) and "affected_rows" in delete_result:
+                            logger.info(f"基于create_time,清理SQL执行成功，删除了 {delete_result['affected_rows']} 行数据")
+                        else:
+                            logger.info("基于create_time,清理SQL执行成功")
+                    else:
+                        logger.error(f"基于create_time,清理SQL执行失败: {delete_result.get('error', '未知错误')}")
+                        # 继续执行原始SQL
+                        logger.warning("继续执行原始SQL")
             
             # 处理full_refresh模式
             elif script_exec_mode.lower() == 'full_refresh':
@@ -392,6 +423,23 @@ WHERE {target_dt_column} >= '{{{{ start_date }}}}'
                 logger.info(f"当前更新模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
         else:
             logger.info("未满足ETL幂等性处理条件，直接执行原始SQL")
+        
+        # 计算日期范围(如果之前未计算)
+        if 'start_date' not in locals() or 'end_date' not in locals():
+            try:
+                start_date, end_date = script_utils.get_date_range(exec_date, schedule_frequency)
+                logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
+            except Exception as date_err:
+                logger.error(f"计算日期范围时出错: {str(date_err)}", exc_info=True)
+                return False
+        
+        # 准备模板参数(如果之前未准备)
+        if 'template_params' not in locals():
+            template_params = {
+                'start_date': start_date,
+                'end_date': end_date,
+                # 可以添加更多默认参数
+            }
         
         # 渲染原始SQL模板
         try:
@@ -446,7 +494,7 @@ if __name__ == "__main__":
     parser.add_argument('--target-table', type=str, required=True, help='目标表名')
     parser.add_argument('--script-name', type=str, required=True, help='脚本名称')
     parser.add_argument('--exec-date', type=str, required=True, help='执行日期 (YYYY-MM-DD)')
-    parser.add_argument('--frequency', type=str, required=True, 
+    parser.add_argument('--schedule_frequency', type=str, required=True, 
                         choices=['daily', 'weekly', 'monthly', 'quarterly', 'yearly'], 
                         help='频率: daily, weekly, monthly, quarterly, yearly')
     
@@ -458,7 +506,7 @@ if __name__ == "__main__":
         "target_table": args.target_table,
         "script_name": args.script_name,
         "exec_date": args.exec_date,
-        "frequency": args.frequency,
+        "schedule_frequency": args.schedule_frequency,
     }
 
     logger.info("命令行测试执行参数: " + str(run_kwargs))

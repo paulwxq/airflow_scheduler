@@ -363,3 +363,24 @@ WHERE summary_date >= '{{{{ start_date }}}}'
     except Exception as e:
         logger.error(f"解析SQL生成清理语句时出错: {str(e)}", exc_info=True)
         return None
+
+def get_one_day_range(exec_date):
+    """
+    根据exec_date返回当天的00:00:00和次日00:00:00，均为datetime对象
+    参数：
+        exec_date (str 或 datetime): 执行日期，格式为YYYY-MM-DD或datetime对象
+    返回：
+        tuple(datetime, datetime): (start_datetime, end_datetime)
+    """
+    shanghai_tz = pytz.timezone('Asia/Shanghai')
+    if isinstance(exec_date, str):
+        date_obj = datetime.strptime(exec_date, '%Y-%m-%d')
+    elif isinstance(exec_date, datetime):
+        date_obj = exec_date
+    else:
+        raise ValueError(f"不支持的exec_date类型: {type(exec_date)}")
+    # 当天00:00:00
+    start_datetime = shanghai_tz.localize(datetime(date_obj.year, date_obj.month, date_obj.day, 0, 0, 0))
+    # 次日00:00:00
+    end_datetime = start_datetime + timedelta(days=1)
+    return start_datetime, end_datetime

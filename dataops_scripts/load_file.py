@@ -334,7 +334,7 @@ def load_file_to_table(file_path, table_name, update_mode='append'):
         return False
 
 def run(table_name, update_mode='append', exec_date=None, target_type=None, 
-        storage_location=None, frequency=None, script_name=None, **kwargs):
+        storage_location=None, schedule_frequency=None, script_name=None, is_manual_dag_trigger=False, **kwargs):
     """
     统一入口函数，支持通配符路径，处理并归档文件
     """
@@ -351,7 +351,8 @@ def run(table_name, update_mode='append', exec_date=None, target_type=None,
     logger.info(f"资源类型: {target_type}, 文件相对路径模式: {storage_location}")
     logger.info(f"基准上传路径: {STRUCTURE_UPLOAD_BASE_PATH}")
     logger.info(f"基准归档路径: {STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH}")
-    logger.info(f"更新频率: {frequency}")
+    logger.info(f"更新频率: {schedule_frequency}")
+    logger.info(f"是否手工触发 manual DAG: {is_manual_dag_trigger}")
     
     # 记录其他参数
     for key, value in kwargs.items():
@@ -429,28 +430,155 @@ def run(table_name, update_mode='append', exec_date=None, target_type=None,
     found_files = list(set(found_files))  # 去重
     logger.info(f"总共找到 {len(found_files)} 个匹配文件: {found_files}")
 
-    # 如果是全量刷新，在处理任何文件前清空表
-    if update_mode == 'full_refresh':
-        conn = None
-        cursor = None
-        try:
-            conn = get_pg_conn()
-            cursor = conn.cursor()
-            # 假设表在 public schema，并为表名加引号
-            logger.info(f"执行全量刷新，清空表 public.\"{table_name}\"")
-            cursor.execute(f'TRUNCATE TABLE public.\"{table_name}\"')
-            conn.commit()
-            logger.info("表 public.\"" + table_name + "\" 已清空。")
-        except Exception as e:
-            logger.error("清空表 public.\"" + table_name + "\" 时出错: " + str(e))
-            if conn:
-                conn.rollback()
-            return False # 清空失败则直接失败退出
-        finally:
-            if cursor:
-                 cursor.close()
-            if conn:
-                 conn.close()
+    # 检查是否开启ETL幂等性
+    try:
+        config = __import__('config')
+        enable_idempotency = getattr(config, 'ENABLE_ETL_IDEMPOTENCY', False)
+    except ImportError:
+        logger.warning("无法导入config模块获取幂等性开关，默认为False")
+        enable_idempotency = False
+    
+    logger.info(f"ETL幂等性开关状态: {enable_idempotency}")
+    
+    # 如果开启了ETL幂等性处理
+    if enable_idempotency:
+        # 处理append模式
+        if update_mode.lower() == 'append':
+            logger.info("当前为append模式，且ETL幂等性开关被打开")
+            conn = None
+            cursor = None
+            try:
+                conn = get_pg_conn()
+                cursor = conn.cursor()
+                
+                if is_manual_dag_trigger:
+                    logger.info("manual dag被手工触发")
+                    # 计算日期范围
+                    try:
+                        start_date, end_date = script_utils.get_date_range(exec_date, schedule_frequency)
+                        logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
+                        
+                        # 尝试获取目标表的日期列
+                        logger.info(f"查询表 {table_name} 的target_dt_column...")
+                        target_dt_query = """
+                            SELECT target_dt_column 
+                            FROM data_transform_scripts 
+                            WHERE target_table = %s 
+                            LIMIT 1
+                        """
+                        cursor.execute(target_dt_query, (table_name,))
+                        result = cursor.fetchone()
+                        
+                        target_dt_column = result[0] if result and result[0] else None
+                        
+                        if target_dt_column:
+                            logger.info(f"找到目标日期列 {target_dt_column}，将生成DELETE语句")
+                            # 生成DELETE语句
+                            delete_sql = f"""DELETE FROM {table_name}
+    WHERE {target_dt_column} >= '{start_date}'
+    AND {target_dt_column} < '{end_date}';"""
+                            
+                            logger.info(f"生成的DELETE语句: {delete_sql}")
+                            
+                            # 执行DELETE操作
+                            cursor.execute(delete_sql)
+                            affected_rows = cursor.rowcount
+                            conn.commit()
+                            logger.info(f"清理SQL执行成功，删除了 {affected_rows} 行数据")
+                        else:
+                            logger.warning(f"目标表 {table_name} 没有设置目标日期列(target_dt_column)，无法生成DELETE语句实现幂等性")
+                            logger.warning("将直接执行原始导入，可能导致数据重复")
+                    except Exception as date_err:
+                        logger.error(f"计算日期范围或执行DELETE时出错: {str(date_err)}", exc_info=True)
+                        # 继续执行后续导入
+                        logger.warning("继续执行原始导入")
+                else:
+                    logger.info(f"不是manual dag手工触发，对目标表 {table_name} create_time 进行数据清理")
+                    
+                    # 获取一天范围的日期
+                    start_date, end_date = script_utils.get_one_day_range(exec_date)
+                    logger.info(f"使用一天范围的日期: start_date={start_date}, end_date={end_date}")
+                    
+                    # 生成基于create_time的DELETE语句
+                    delete_sql = f"""DELETE FROM {table_name}
+    WHERE create_time >= '{start_date}'
+    AND create_time < '{end_date}';"""
+                    
+                    logger.info(f"生成的基于create_time的DELETE语句: {delete_sql}")
+                    
+                    try:
+                        # 执行DELETE操作
+                        cursor.execute(delete_sql)
+                        affected_rows = cursor.rowcount
+                        conn.commit()
+                        logger.info(f"基于create_time,清理SQL执行成功，删除了 {affected_rows} 行数据")
+                    except Exception as del_err:
+                        logger.error(f"基于create_time,清理SQL执行失败: {str(del_err)}", exc_info=True)
+                        conn.rollback()
+                        # 继续执行后续导入
+                        logger.warning("继续执行原始导入")
+            except Exception as e:
+                logger.error(f"ETL幂等性处理出错: {str(e)}", exc_info=True)
+                if conn and conn.status == psycopg2.extensions.STATUS_IN_TRANSACTION:
+                    conn.rollback()
+            finally:
+                if cursor:
+                    cursor.close()
+                if conn:
+                    conn.close()
+        
+        # 处理full_refresh模式
+        elif update_mode.lower() == 'full_refresh':
+            # 保持原有的full_refresh逻辑，不做修改
+            logger.info("当前为full_refresh模式，将执行TRUNCATE操作")
+            conn = None
+            cursor = None
+            try:
+                conn = get_pg_conn()
+                cursor = conn.cursor()
+                # 假设表在 public schema，并为表名加引号
+                logger.info(f"执行全量刷新，清空表 public.\"{table_name}\"")
+                cursor.execute(f'TRUNCATE TABLE public.\"{table_name}\"')
+                conn.commit()
+                logger.info("表 public.\"" + table_name + "\" 已清空。")
+            except Exception as e:
+                logger.error("清空表 public.\"" + table_name + "\" 时出错: " + str(e))
+                if conn:
+                    conn.rollback()
+                return False # 清空失败则直接失败退出
+            finally:
+                if cursor:
+                     cursor.close()
+                if conn:
+                     conn.close()
+        else:
+            logger.info(f"当前更新模式 {update_mode} 不是append或full_refresh，不执行幂等性处理")
+    else:
+        # 如果未开启ETL幂等性处理，保持原有的full_refresh逻辑
+        if update_mode == 'full_refresh':
+            logger.info("ETL幂等性未开启，但当前为full_refresh模式，仍将执行TRUNCATE操作")
+            conn = None
+            cursor = None
+            try:
+                conn = get_pg_conn()
+                cursor = conn.cursor()
+                # 假设表在 public schema，并为表名加引号
+                logger.info(f"执行全量刷新，清空表 public.\"{table_name}\"")
+                cursor.execute(f'TRUNCATE TABLE public.\"{table_name}\"')
+                conn.commit()
+                logger.info("表 public.\"" + table_name + "\" 已清空。")
+            except Exception as e:
+                logger.error("清空表 public.\"" + table_name + "\" 时出错: " + str(e))
+                if conn:
+                    conn.rollback()
+                return False # 清空失败则直接失败退出
+            finally:
+                if cursor:
+                     cursor.close()
+                if conn:
+                     conn.close()
+        else:
+            logger.info("ETL幂等性未开启，直接执行文件加载")
 
     # 处理并归档每个找到的文件
     processed_files_count = 0
