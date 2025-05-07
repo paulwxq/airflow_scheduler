@@ -66,7 +66,8 @@ from config import NEO4J_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG
 import traceback
 import pendulum
 import pytz
-from utils import get_pg_conn, get_cn_exec_date, check_script_exists
+from utils import get_pg_conn, get_cn_exec_date, check_script_exists, get_complete_script_info
+from airflow.exceptions import AirflowException
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -81,73 +82,6 @@ default_args = {
     'retries': 1,
     'retry_delay': timedelta(minutes=1),
 }
-
-def get_execution_mode(table_name):
-    """
-    从Neo4j获取表的执行模式
-    
-    参数:
-        table_name (str): 表名
-        
-    返回:
-        str: 执行模式，如果未找到则返回"append"作为默认值
-    """
-    try:
-        driver = GraphDatabase.driver(
-            NEO4J_CONFIG['uri'], 
-            auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
-        )
-        
-        # 先检查是否为structure类型的DataResource
-        with driver.session() as session:
-            query_structure = """
-                MATCH (n:DataResource {en_name: $table_name})
-                RETURN n.type AS type
-            """
-            
-            result = session.run(query_structure, table_name=table_name)
-            record = result.single()
-            
-            if record and record.get("type") == "structure":
-                logger.info(f"表 {table_name} 是structure类型的DataResource，使用默认执行模式'append'")
-                return "append"
-        
-        # 查询执行模式，分别尝试DataModel和DataResource
-        with driver.session() as session:
-            # 首先检查DataModel类型表
-            query_model = """
-                MATCH (n:DataModel {en_name: $table_name})-[rel:DERIVED_FROM]->()
-                RETURN rel.exec_mode AS execution_mode LIMIT 1
-            """
-            
-            result = session.run(query_model, table_name=table_name)
-            record = result.single()
-            
-            if record and record.get("execution_mode"):
-                return record.get("execution_mode")
-            
-            # 然后检查DataResource类型表
-            query_resource = """
-                MATCH (n:DataResource {en_name: $table_name})-[rel:ORIGINATES_FROM]->()
-                RETURN rel.exec_mode AS execution_mode LIMIT 1
-            """
-            
-            result = session.run(query_resource, table_name=table_name)
-            record = result.single()
-            
-            if record and record.get("execution_mode"):
-                return record.get("execution_mode")
-            
-            # 如果上面两种方式都找不到，使用默认值
-            logger.warning(f"未在Neo4j中找到表 {table_name} 的执行模式，使用默认值 'append'")
-            return "append"
-            
-    except Exception as e:
-        logger.error(f"获取表 {table_name} 的执行模式时出错: {str(e)}")
-        return "append"
-    finally:
-        if driver:
-            driver.close()
 
 def get_dag_params(**context):
     """获取DAG运行参数"""
@@ -304,19 +238,19 @@ def find_scripts_for_table(table_name):
                     return scripts
                 
             if table_label == "DataModel":
-                # 查询DataModel的所有脚本关系
+                # 查询DataModel表中的脚本关系
                 query = """
                     MATCH (target:DataModel {en_name: $table_name})-[rel:DERIVED_FROM]->(source)
                     RETURN rel.script_name AS script_name, rel.script_type AS script_type
                 """
             elif table_label == "DataResource":
-                # 查询DataResource的所有脚本关系
+                # 查询DataResource表中的脚本关系
                 query = """
                     MATCH (target:DataResource {en_name: $table_name})-[rel:ORIGINATES_FROM]->(source)
                     RETURN rel.script_name AS script_name, rel.script_type AS script_type
                 """
             else:
-                logger.warning(f"表 {table_name} 不是DataModel或DataResource类型")
+                logger.warning(f"表 {table_name} 类型未知或不受支持，无法查找脚本")
                 return scripts
             
             result = session.run(query, table_name=table_name)
@@ -330,178 +264,27 @@ def find_scripts_for_table(table_name):
                         "script_name": script_name,
                         "script_type": script_type
                     })
+                    
+        # 如果没有找到脚本，则尝试使用表名作为脚本名称的一部分查找
+        if not scripts:
+            logger.info(f"未在关系中找到表 {table_name} 对应的脚本，尝试使用表名查找")
             
-            # 如果找不到脚本，使用表名作为基础生成默认脚本名
-            if not scripts:
-                logger.warning(f"表 {table_name} 没有关联的脚本，尝试使用默认脚本名")
-                
-                # 尝试查找可能的默认脚本文件
-                default_script_name = f"{table_name}_process.py"
-                script_path = os.path.join(SCRIPTS_BASE_PATH, default_script_name)
-                
-                if os.path.exists(script_path):
-                    logger.info(f"发现默认脚本文件: {default_script_name}")
-                    scripts.append({
-                        "script_name": default_script_name,
-                        "script_type": "python_script"
-                    })
+            default_script_name = f"{table_name}_process.py"
+            script_path = os.path.join(SCRIPTS_BASE_PATH, default_script_name)
+            
+            if os.path.exists(script_path):
+                logger.info(f"找到默认脚本: {default_script_name}")
+                scripts.append({
+                    "script_name": default_script_name,
+                    "script_type": "python_script"
+                })
     except Exception as e:
-        logger.error(f"查找表 {table_name} 对应的脚本时出错: {str(e)}")
+        logger.error(f"查找表 {table_name} 的脚本信息时出错: {str(e)}")
+        logger.error(traceback.format_exc())
     finally:
         driver.close()
-    
-    logger.info(f"表 {table_name} 关联的脚本: {scripts}")
-    return scripts
-
-def get_script_info_from_neo4j(script_name, target_table):
-    """
-    从Neo4j获取脚本和表的详细信息
-    
-    参数:
-        script_name: 脚本名称
-        target_table: 目标表名
         
-    返回:
-        dict: 脚本和表的详细信息
-    """
-    driver = GraphDatabase.driver(
-        NEO4J_CONFIG['uri'], 
-        auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
-    )
-    
-    # 获取表的标签类型
-    table_label = get_table_label(target_table)
-    
-    script_info = {
-        'script_name': script_name,
-        'target_table': target_table,
-        'script_id': f"{script_name.replace('.', '_')}_{target_table}",
-        'target_table_label': table_label,
-        'source_tables': [],
-        'script_type': 'python_script'  # 默认类型改为python_script，表示物理脚本文件
-    }
-    
-    # 检查是否为structure类型的DataResource
-    try:
-        with driver.session() as session:
-            if table_label == 'DataResource':
-                query_structure = """
-                    MATCH (n:DataResource {en_name: $table_name})
-                    RETURN n.type AS type, n.storage_location AS storage_location, n.frequency AS frequency
-                """
-                result = session.run(query_structure, table_name=target_table)
-                record = result.single()
-                
-                if record and record.get("type") == "structure":
-                    logger.info(f"表 {target_table} 是structure类型的DataResource")
-                    
-                    # 设置特殊属性
-                    script_info['target_type'] = 'structure'
-                    storage_location = record.get("storage_location")
-                    frequency = record.get("frequency", "daily")
-                    
-                    if storage_location:
-                        script_info['storage_location'] = storage_location
-                    script_info['frequency'] = frequency
-                    
-                    # 如果没有指定脚本名称或指定的是default，则设置为load_file.py
-                    if not script_name or script_name.lower() == 'default' or script_name == 'load_file.py':
-                        script_info['script_name'] = 'load_file.py'
-                        script_info['script_id'] = f"load_file_py_{target_table}"
-                        script_info['execution_mode'] = "append"
-                        logger.info(f"对于structure类型的DataResource表 {target_table}，使用默认脚本'load_file.py'")
-                        return script_info
-                    
-    except Exception as e:
-        logger.error(f"检查表 {target_table} 是否为structure类型时出错: {str(e)}")
-        logger.error(traceback.format_exc())
-    
-    # 根据表标签类型查询脚本信息和依赖关系
-    try:
-        with driver.session() as session:
-            if script_info['target_table_label'] == 'DataModel':
-                # 查询DataModel的上游依赖
-                query = """
-                    MATCH (target:DataModel {en_name: $table_name})-[rel:DERIVED_FROM]->(source)
-                    RETURN source.en_name AS source_table, rel.script_name AS script_name, rel.script_type AS script_type
-                """
-                result = session.run(query, table_name=target_table)
-                
-                for record in result:
-                    source_table = record.get("source_table")
-                    source_labels = record.get("source_labels", [])
-                    db_script_name = record.get("script_name")
-                    script_type = record.get("script_type", "python_script")
-                    
-                    # 验证脚本名称匹配
-                    if db_script_name and db_script_name == script_name:
-                        if source_table and source_table not in script_info['source_tables']:
-                            script_info['source_tables'].append(source_table)
-                        script_info['script_type'] = script_type
-            
-            elif script_info['target_table_label'] == 'DataResource':
-                # 查询DataResource的上游依赖
-                query = """
-                    MATCH (target:DataResource {en_name: $table_name})-[rel:ORIGINATES_FROM]->(source)
-                    RETURN source.en_name AS source_table, rel.script_name AS script_name, rel.script_type AS script_type
-                """
-                result = session.run(query, table_name=target_table)
-                
-                for record in result:
-                    source_table = record.get("source_table")
-                    source_labels = record.get("source_labels", [])
-                    db_script_name = record.get("script_name")
-                    script_type = record.get("script_type", "python_script")
-                    
-                    # 验证脚本名称匹配
-                    if db_script_name and db_script_name == script_name:
-                        if source_table and source_table not in script_info['source_tables']:
-                            script_info['source_tables'].append(source_table)
-                        script_info['script_type'] = script_type
-            
-            # 如果没有找到依赖关系，记录警告
-            if not script_info['source_tables']:
-                logger.warning(f"未找到脚本 {script_name} 和表 {target_table} 的依赖关系")
-                
-            # 获取特殊属性（如果是structure类型）
-            if script_info['target_table_label'] == 'DataResource':
-                query = """
-                    MATCH (n:DataResource {en_name: $table_name})
-                    RETURN n.type AS target_type, n.storage_location AS storage_location, n.frequency AS frequency
-                """
-                result = session.run(query, table_name=target_table)
-                record = result.single()
-                
-                if record:
-                    target_type = record.get("target_type")
-                    storage_location = record.get("storage_location")
-                    frequency = record.get("frequency")
-                    
-                    if target_type:
-                        script_info['target_type'] = target_type
-                    if storage_location:
-                        script_info['storage_location'] = storage_location
-                    if frequency:
-                        script_info['frequency'] = frequency
-                    
-                    # 如果是structure类型，再次检查是否应使用默认脚本
-                    if target_type == 'structure' and (not script_name or script_name.lower() == 'default' or script_name == 'load_file.py'):
-                        script_info['script_name'] = 'load_file.py'
-                        script_info['script_id'] = f"load_file_py_{target_table}"
-                        script_info['execution_mode'] = "append"
-                        logger.info(f"对于structure类型的DataResource表 {target_table}，使用默认脚本'load_file.py'")
-    
-    except Exception as e:
-        logger.error(f"从Neo4j获取脚本 {script_name} 和表 {target_table} 的信息时出错: {str(e)}")
-        logger.error(traceback.format_exc())
-    finally:
-        driver.close()
-    
-    # 获取表的执行模式
-    script_info['execution_mode'] = get_execution_mode(target_table)
-    
-    logger.info(f"获取到脚本信息: {script_info}")
-    return script_info
+    return scripts
 
 def get_upstream_script_dependencies(script_info, dependency_level='resource'):
     """
@@ -569,13 +352,22 @@ def get_upstream_script_dependencies(script_info, dependency_level='resource'):
                     if table_label == 'DataResource':
                         query_structure = """
                             MATCH (n:DataResource {en_name: $table_name})
-                            RETURN n.type AS type, n.storage_location AS storage_location, n.frequency AS frequency
+                            RETURN n.type AS type
                         """
                         result = session.run(query_structure, table_name=source_table)
                         record = result.single()
                         
                         if record and record.get("type") == "structure":
                             logger.info(f"上游表 {source_table} 是structure类型的DataResource，使用默认脚本'load_file.py'")
+                            
+                            # 获取structure类型表的基本信息
+                            structure_query = """
+                                MATCH (n:DataResource {en_name: $table_name})
+                                RETURN n.type AS type, n.storage_location AS storage_location, 
+                                      n.schedule_frequency AS schedule_frequency
+                            """
+                            structure_result = session.run(structure_query, table_name=source_table)
+                            structure_record = structure_result.single()
                             
                             # 构建structure类型表的脚本信息
                             upstream_script_name = "load_file.py"
@@ -585,21 +377,7 @@ def get_upstream_script_dependencies(script_info, dependency_level='resource'):
                             # 如果还没有处理过这个脚本
                             if upstream_id not in visited:
                                 # 创建脚本信息
-                                upstream_info = {
-                                    'script_name': upstream_script_name,
-                                    'target_table': upstream_target_table,
-                                    'script_id': upstream_id,
-                                    'target_table_label': 'DataResource',
-                                    'target_type': 'structure',
-                                    'source_tables': [],
-                                    'script_type': 'python_script',
-                                    'execution_mode': 'append',
-                                    'frequency': record.get("frequency", "daily")
-                                }
-                                
-                                # 添加storage_location如果存在
-                                if record.get("storage_location"):
-                                    upstream_info["storage_location"] = record.get("storage_location")
+                                upstream_info = get_complete_script_info(upstream_script_name, upstream_target_table)
                                 
                                 # 添加到图中
                                 G.add_node(upstream_id, **upstream_info)
@@ -650,7 +428,7 @@ def get_upstream_script_dependencies(script_info, dependency_level='resource'):
                         
                         if upstream_id not in visited:
                             # 获取完整的上游脚本信息
-                            upstream_info = get_script_info_from_neo4j(upstream_script_name, upstream_target_table)
+                            upstream_info = get_complete_script_info(upstream_script_name, upstream_target_table)
                             
                             # 添加到图中
                             G.add_node(upstream_id, **upstream_info)
@@ -715,7 +493,7 @@ def execute_python_script(script_info):
     """
     script_name = script_info.get('script_name')
     target_table = script_info.get('target_table')
-    execution_mode = script_info.get('execution_mode', 'append')
+    update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
     source_tables = script_info.get('source_tables', [])
     frequency = script_info.get('frequency', 'daily')
@@ -725,7 +503,7 @@ def execute_python_script(script_info):
     # 记录开始执行
     logger.info(f"===== 开始执行物理Python脚本文件: {script_name} =====")
     logger.info(f"目标表: {target_table}")
-    logger.info(f"执行模式: {execution_mode}")
+    logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
     logger.info(f"源表: {source_tables}")
     logger.info(f"频率: {frequency}")
@@ -752,7 +530,7 @@ def execute_python_script(script_info):
             # 构建函数参数
             run_kwargs = {
                 "table_name": target_table,
-                "execution_mode": execution_mode,
+                "update_mode": update_mode,
                 "frequency": frequency,
                 "exec_date": exec_date  # 使用传入的执行日期而不是当前日期
             }
@@ -800,7 +578,7 @@ def execute_sql(script_info):
     """
     script_name = script_info.get('script_name')
     target_table = script_info.get('target_table')
-    execution_mode = script_info.get('execution_mode', 'append')
+    update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
     frequency = script_info.get('frequency', 'daily')
     # 使用传入的执行日期，如果不存在则使用当前日期
@@ -809,7 +587,7 @@ def execute_sql(script_info):
     # 记录开始执行
     logger.info(f"===== 开始执行SQL脚本: {script_name} =====")
     logger.info(f"目标表: {target_table}")
-    logger.info(f"执行模式: {execution_mode}")
+    logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
     logger.info(f"频率: {frequency}")
     logger.info(f"执行日期: {exec_date}")
@@ -841,7 +619,7 @@ def execute_sql(script_info):
                 "exec_date": exec_date,  # 使用传入的执行日期而不是当前日期
                 "frequency": frequency,
                 "target_table_label": target_table_label,
-                "execution_mode": execution_mode
+                "update_mode": update_mode
             }
             
             # 如果是structure类型，添加特殊参数
@@ -887,7 +665,7 @@ def execute_python(script_info):
     """
     script_name = script_info.get('script_name')
     target_table = script_info.get('target_table')
-    execution_mode = script_info.get('execution_mode', 'append')
+    update_mode = script_info.get('update_mode', 'append')
     target_table_label = script_info.get('target_table_label')
     frequency = script_info.get('frequency', 'daily')
     # 使用传入的执行日期，如果不存在则使用当前日期
@@ -896,7 +674,7 @@ def execute_python(script_info):
     # 记录开始执行
     logger.info(f"===== 开始执行Python脚本(data_transform_scripts): {script_name} =====")
     logger.info(f"目标表: {target_table}")
-    logger.info(f"执行模式: {execution_mode}")
+    logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")
     logger.info(f"频率: {frequency}")
     logger.info(f"执行日期: {exec_date}")
@@ -928,7 +706,7 @@ def execute_python(script_info):
                 "exec_date": exec_date,  # 使用传入的执行日期而不是当前日期
                 "frequency": frequency,
                 "target_table_label": target_table_label,
-                "execution_mode": execution_mode
+                "update_mode": update_mode
             }
             
             # 如果是structure类型，添加特殊参数
@@ -1015,7 +793,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
     # 情况1: 同时提供脚本名称和目标表名
     if script_name and target_table:
         logger.info(f"方案1: 同时提供了脚本名称和目标表名")
-        script_info = get_script_info_from_neo4j(script_name, target_table)
+        script_info = get_complete_script_info(script_name, target_table)
         if script_info:
             all_script_infos.append(script_info)
     
@@ -1025,7 +803,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
         target_table = find_target_table_for_script(script_name)
         if target_table:
             logger.info(f"找到脚本 {script_name} 对应的目标表: {target_table}")
-            script_info = get_script_info_from_neo4j(script_name, target_table)
+            script_info = get_complete_script_info(script_name, target_table)
             if script_info:
                 all_script_infos.append(script_info)
         else:
@@ -1055,7 +833,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
                     
                     if record and record.get("type") == "structure":
                         logger.info(f"表 {target_table} 是structure类型的DataResource，使用默认脚本'load_file.py'")
-                        script_info = get_script_info_from_neo4j('load_file.py', target_table)
+                        script_info = get_complete_script_info('load_file.py', target_table)
                         if script_info:
                             all_script_infos.append(script_info)
                             return all_script_infos
@@ -1071,7 +849,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
             # 如果是DataResource的表，再次检查是否为structure类型
             if table_label == 'DataResource':
                 logger.info(f"尝试使用默认脚本'load_file.py'处理表 {target_table}")
-                script_info = get_script_info_from_neo4j('load_file.py', target_table)
+                script_info = get_complete_script_info('load_file.py', target_table)
                 if script_info:
                     all_script_infos.append(script_info)
             
@@ -1084,7 +862,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
             # 如果只有一个不同的脚本名称，处理为单个脚本
             single_script_name = next(iter(script_names))
             logger.info(f"表 {target_table} 只关联了一个脚本: {single_script_name}")
-            script_info = get_script_info_from_neo4j(single_script_name, target_table)
+            script_info = get_complete_script_info(single_script_name, target_table)
             if script_info:
                 all_script_infos.append(script_info)
         else:
@@ -1092,7 +870,7 @@ def prepare_script_info(script_name=None, target_table=None, dependency_level=No
             logger.info(f"表 {target_table} 关联了多个不同脚本: {script_names}")
             for script in scripts:
                 script_name = script['script_name']
-                script_info = get_script_info_from_neo4j(script_name, target_table)
+                script_info = get_complete_script_info(script_name, target_table)
                 if script_info:
                     all_script_infos.append(script_info)
     
@@ -1183,7 +961,7 @@ def execute_script_chain(**context):
     
     if not dependency_chain:
         logger.error("没有找到依赖链，无法执行脚本")
-        return False
+        raise AirflowException("没有找到依赖链，无法执行脚本")
     
     # 记录依赖链信息
     logger.info(f"准备执行依赖链中的 {len(dependency_chain)} 个脚本")
@@ -1220,11 +998,14 @@ def execute_script_chain(**context):
         }
         results.append(result)
         
-        # 如果任何一个脚本执行失败，标记整体失败
+        # 如果任何一个脚本执行失败，标记整体失败并抛出异常
         if not success:
             all_success = False
-            logger.error(f"脚本 {script_name} 执行失败，中断执行链")
-            break
+            error_message = f"脚本 {script_name} 执行失败，中断执行链"
+            logger.error(error_message)
+            # 保存执行结果后抛出异常
+            ti.xcom_push(key='execution_results', value=results)
+            raise AirflowException(error_message)
     
     # 保存执行结果
     ti.xcom_push(key='execution_results', value=results)
@@ -1330,13 +1111,13 @@ with DAG(
         task_id='generate_execution_report',
         python_callable=generate_execution_report,
         provide_context=True,
-        trigger_rule='all_done'  # 无论前面的任务成功或失败，都生成报告
+        trigger_rule='all_success'  # 修改为仅在上游任务成功时执行
     )
     
     # 任务4: 完成标记
     completed_task = EmptyOperator(
         task_id='execution_completed',
-        trigger_rule='all_done'  # 无论前面的任务成功或失败，都标记为完成
+        trigger_rule='all_success'  # 修改为仅在上游任务成功时执行
     )
     
     # 设置任务依赖关系

@@ -4,7 +4,7 @@ import os
 
 # PostgreSQL 连接信息
 PG_CONFIG = {
-    "host": "localhost",
+    "host": "192.168.67.10",
     "port": 5432,
     "user": "postgres",
     "password": "postgres",

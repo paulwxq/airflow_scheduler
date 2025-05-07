@@ -3,7 +3,7 @@
 import sys
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 import textwrap
 from airflow.exceptions import AirflowException
@@ -16,68 +16,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger("execution_python")
 
-# 将同级目录加入到Python搜索路径
+# 明确地将当前目录添加到Python模块搜索路径的最前面，确保优先从当前目录导入
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
-    sys.path.append(current_dir)
+    sys.path.insert(0, current_dir)
+    logger.info(f"将当前目录添加到Python模块搜索路径: {current_dir}")
 
-# 尝试导入script_utils，使用多级导入策略
+# 直接尝试导入script_utils
 try:
     import script_utils
-    logger.info("成功导入script_utils模块")
+    from script_utils import get_pg_config
+    logger.info(f"成功导入script_utils模块，模块路径: {script_utils.__file__}")
 except ImportError as e:
-    logger.error(f"无法直接导入script_utils: {str(e)}")
-    
-    # 尝试备用方法1：完整路径导入
-    try:
-        sys.path.append(os.path.dirname(current_dir))  # 添加父目录
-        import dataops.scripts.script_utils as script_utils
-        logger.info("使用完整路径成功导入script_utils模块")
-    except ImportError as e2:
-        logger.error(f"使用完整路径导入失败: {str(e2)}")
-        
-        # 尝试备用方法2：动态导入
-        try:
-            import importlib.util
-            script_utils_path = os.path.join(current_dir, "script_utils.py")
-            logger.info(f"尝试从路径动态导入: {script_utils_path}")
-            
-            spec = importlib.util.spec_from_file_location("script_utils", script_utils_path)
-            script_utils = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(script_utils)
-            logger.info("通过动态导入成功加载script_utils模块")
-        except Exception as e3:
-            logger.error(f"动态导入也失败: {str(e3)}")
-            raise ImportError(f"无法导入script_utils模块，所有方法都失败")
+    logger.error(f"导入script_utils模块失败: {str(e)}")
+    logger.error(f"当前Python模块搜索路径: {sys.path}")
+    logger.error(f"当前目录内容: {os.listdir(current_dir)}")
+    raise ImportError(f"无法导入script_utils模块，请确保script_utils.py在当前目录下")
 
-# 动态导入 config
-def get_config():
-    """
-    从config模块导入配置
-    
-    返回:
-        dict: PG_CONFIG 数据库连接配置
-    """
+# 使用script_utils中的方法获取配置
+try:
+    # 获取PostgreSQL配置
+    PG_CONFIG = get_pg_config()
+    logger.info(f"通过script_utils.get_pg_config()获取PostgreSQL配置成功")
+except Exception as e:
+    logger.error(f"获取配置失败，使用默认值: {str(e)}")
     # 默认配置
-    default_pg_config = {
+    PG_CONFIG = {
         "host": "localhost",
         "port": 5432,
         "user": "postgres",
         "password": "postgres",
         "database": "dataops"
     }
-    try:
-        config = __import__('config')
-        logger.info("从config模块直接导入配置")
-        pg_config = getattr(config, 'PG_CONFIG', default_pg_config)
-        return pg_config
-    except ImportError:
-        logger.warning("未找到 config.py，使用默认数据库配置")
-        return default_pg_config
-
-# 导入配置
-PG_CONFIG = get_config()
-logger.info(f"配置加载完成: 数据库连接={PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['database']}")
 
 def get_pg_conn():
     """获取PostgreSQL连接"""
@@ -261,17 +231,28 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None, f
         
         # 日期计算
         try:
+            # 直接使用script_utils.get_date_range计算日期范围
+            logger.info(f"使用script_utils.get_date_range计算日期范围，参数: exec_date={exec_date}, frequency={frequency}")
             start_date, end_date = script_utils.get_date_range(exec_date, frequency)
             logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
         except Exception as date_err:
             logger.error(f"日期处理失败: {str(date_err)}", exc_info=True)
-            return False
+            # 使用简单的默认日期范围计算
+            date_obj = datetime.strptime(exec_date, '%Y-%m-%d')
+            if frequency.lower() == 'daily':
+                start_date = date_obj.strftime('%Y-%m-%d')
+                end_date = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+            else:
+                # 对其他频率使用默认范围
+                start_date = exec_date
+                end_date = (date_obj + timedelta(days=30)).strftime('%Y-%m-%d')
+            logger.warning(f"使用默认日期范围计算: start_date={start_date}, end_date={end_date}")
         
         # 检查是否开启ETL幂等性
         target_table_label = kwargs.get('target_table_label', '')
-        script_exec_mode = kwargs.get('execution_mode', 'append')  # 默认为append
+        script_exec_mode = kwargs.get('update_mode', 'append')  # 只使用update_mode
         
-        logger.info(f"脚本执行模式: {script_exec_mode}")
+        logger.info(f"脚本更新模式: {script_exec_mode}")
         
         # 导入config模块获取幂等性开关
         try:
@@ -338,7 +319,7 @@ WHERE {target_dt_column} >= '{start_date}'
                     logger.warning("TRUNCATE失败，继续执行原始Python脚本")
             
             else:
-                logger.info(f"当前执行模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
+                logger.info(f"当前更新模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
         else:
             logger.info("未开启ETL幂等性，直接执行Python脚本")
 
@@ -410,16 +391,16 @@ WHERE {target_dt_column} >= '{start_date}'
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='执行Python脚本片段')
+    parser = argparse.ArgumentParser(description='执行Python脚本')
     parser.add_argument('--target-table', type=str, required=True, help='目标表名')
     parser.add_argument('--script-name', type=str, required=True, help='脚本名称')
     parser.add_argument('--exec-date', type=str, required=True, help='执行日期 (YYYY-MM-DD)')
     parser.add_argument('--frequency', type=str, required=True, 
                         choices=['daily', 'weekly', 'monthly', 'quarterly', 'yearly'], 
                         help='频率: daily, weekly, monthly, quarterly, yearly')
-    parser.add_argument('--execution-mode', type=str, default='append', 
-                        choices=['append', 'full_refresh'], 
-                        help='执行模式: append(追加), full_refresh(全量刷新)')
+    parser.add_argument('--update-mode', type=str, default='append',
+                       choices=['append', 'full_refresh'],
+                       help='更新模式: append(追加), full_refresh(全量刷新)')
     
     args = parser.parse_args()
 
@@ -429,7 +410,7 @@ if __name__ == "__main__":
         "script_name": args.script_name,
         "exec_date": args.exec_date,
         "frequency": args.frequency,
-        "execution_mode": args.execution_mode
+        "update_mode": args.update_mode
     }
     
     logger.info("命令行测试执行参数: " + str(run_kwargs))

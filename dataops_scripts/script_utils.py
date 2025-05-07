@@ -3,9 +3,27 @@
 # 这是dataops_scripts目录下的文件 - 用于验证路径修改成功
 import logging
 import sys
+import os
+
+# 添加父目录到Python路径，以便能导入dags目录下的config模块
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+import importlib.util
 from datetime import datetime, timedelta
 import pytz
 import re  # 添加re模块以支持正则表达式
+
+# 导入Airflow相关包
+try:
+    from airflow.models import Variable
+except ImportError:
+    # 处理在非Airflow环境中运行的情况
+    class Variable:
+        @staticmethod
+        def get(key, default_var=None):
+            return default_var
 
 # 配置日志记录器
 logging.basicConfig(
@@ -17,6 +35,110 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("script_utils")
+
+def get_config_path():
+    """
+    从Airflow变量中获取DATAOPS_DAGS_PATH
+    
+    返回:
+        str: config.py的完整路径
+    """
+    try:
+        # 从Airflow变量中获取DATAOPS_DAGS_PATH
+        dags_path = Variable.get("DATAOPS_DAGS_PATH", "/opt/airflow/dags")
+        logger.info(f"从Airflow变量获取到DATAOPS_DAGS_PATH: {dags_path}")
+        
+        # 构建config.py的完整路径
+        config_path = os.path.join(dags_path, "config.py")
+        
+        if not os.path.exists(config_path):
+            logger.warning(f"配置文件路径不存在: {config_path}, 将使用默认路径")
+            # 尝试使用相对路径
+            alt_config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../dags/config.py"))
+            if os.path.exists(alt_config_path):
+                logger.info(f"使用替代配置路径: {alt_config_path}")
+                return alt_config_path
+        
+        return config_path
+    except Exception as e:
+        logger.error(f"获取配置路径时出错: {str(e)}")
+        # 使用默认路径
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "../dags/config.py"))
+
+def load_config_module():
+    """
+    动态加载config.py模块
+    
+    返回:
+        module: 加载的config模块
+    """
+    try:
+        config_path = get_config_path()
+        logger.info(f"正在加载配置文件: {config_path}")
+        
+        # 动态加载config.py模块
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        
+        return config_module
+    except Exception as e:
+        logger.error(f"加载配置模块时出错: {str(e)}")
+        raise ImportError(f"无法加载配置模块: {str(e)}")
+
+def get_pg_config():
+    """
+    从config.py获取PostgreSQL数据库配置
+    
+    返回:
+        dict: PostgreSQL配置字典
+    """
+    try:
+        config_module = load_config_module()
+        pg_config = getattr(config_module, "PG_CONFIG", None)
+        
+        if pg_config is None:
+            logger.warning("配置模块中未找到PG_CONFIG")
+            # 返回默认配置
+            return {
+                "host": "localhost",
+                "port": 5432,
+                "user": "postgres",
+                "password": "postgres",
+                "database": "dataops"
+            }
+        
+        logger.info(f"已获取PostgreSQL配置: {pg_config}")
+        return pg_config
+    except Exception as e:
+        logger.error(f"获取PostgreSQL配置时出错: {str(e)}")
+        # 返回默认配置
+        return {
+            "host": "localhost",
+            "port": 5432,
+            "user": "postgres",
+            "password": "postgres",
+            "database": "dataops"
+        }
+
+def get_upload_paths():
+    """
+    从config.py获取文件上传和归档路径
+    
+    返回:
+        tuple: (上传路径, 归档路径)
+    """
+    try:
+        config_module = load_config_module()
+        upload_path = getattr(config_module, "STRUCTURE_UPLOAD_BASE_PATH", "/data/csv")
+        archive_path = getattr(config_module, "STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH", "/data/archive")
+        
+        logger.info(f"已获取上传路径: {upload_path}, 归档路径: {archive_path}")
+        return upload_path, archive_path
+    except Exception as e:
+        logger.error(f"获取上传路径时出错: {str(e)}")
+        # 返回默认路径
+        return "/data/csv", "/data/archive"
 
 def get_date_range(exec_date, frequency):
     """

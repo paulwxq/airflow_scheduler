@@ -10,6 +10,17 @@ import csv
 import glob
 import shutil
 import re
+import argparse
+
+# 修改Python导入路径，确保能找到同目录下的script_utils模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# 先导入整个模块，确保script_utils对象在全局作用域可用
+import script_utils
+# 再导入具体的方法
+from script_utils import get_pg_config, get_upload_paths, logger as utils_logger
 
 # 配置日志记录器
 logging.basicConfig(
@@ -22,41 +33,25 @@ logging.basicConfig(
 
 logger = logging.getLogger("load_file")
 
-# 添加健壮的导入机制
-def get_config():
-    """
-    从config模块导入配置
-    
-    返回:
-        tuple: (PG_CONFIG, STRUCTURE_UPLOAD_BASE_PATH, STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH)
-    """
+# 使用script_utils中的方法获取配置
+try:
+    # 获取PostgreSQL配置
+    PG_CONFIG = get_pg_config()
+    # 获取上传和归档路径
+    STRUCTURE_UPLOAD_BASE_PATH, STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH = get_upload_paths()
+    logger.info(f"通过script_utils获取配置成功: 上传路径={STRUCTURE_UPLOAD_BASE_PATH}, 归档路径={STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH}")
+except Exception as e:
+    logger.error(f"获取配置失败，使用默认值: {str(e)}")
     # 默认配置
-    default_pg_config = {
+    PG_CONFIG = {
         "host": "localhost",
         "port": 5432,
         "user": "postgres",
         "password": "postgres",
         "database": "dataops",
     }
-    default_upload_path = '/tmp/uploads'
-    default_archive_path = '/tmp/uploads/archive'
-    
-    try:
-        # 动态导入，避免IDE警告
-        config = __import__('config')
-        logger.info("从config模块直接导入配置")
-        pg_config = getattr(config, 'PG_CONFIG', default_pg_config)
-        upload_path = getattr(config, 'STRUCTURE_UPLOAD_BASE_PATH', default_upload_path)
-        archive_path = getattr(config, 'STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH', default_archive_path)
-        return pg_config, upload_path, archive_path
-    except ImportError:
-        # 使用默认配置
-        logger.warning("无法导入config模块，使用默认值")
-        return default_pg_config, default_upload_path, default_archive_path
-
-# 导入配置
-PG_CONFIG, STRUCTURE_UPLOAD_BASE_PATH, STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH = get_config()
-logger.info(f"配置加载完成: 上传路径={STRUCTURE_UPLOAD_BASE_PATH}, 归档路径={STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH}")
+    STRUCTURE_UPLOAD_BASE_PATH = '/tmp/uploads'
+    STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH = '/tmp/uploads/archive'
 
 def get_pg_conn():
     """获取PostgreSQL连接"""
@@ -302,14 +297,14 @@ def load_dataframe_to_table(df, file_path, table_name):
         if conn:
             conn.close()
 
-def load_file_to_table(file_path, table_name, execution_mode='append'):
+def load_file_to_table(file_path, table_name, update_mode='append'):
     """
-    根据文件类型，加载文件数据到目标表
+    加载文件到表，支持不同的文件类型
     
     参数:
         file_path (str): 文件路径
         table_name (str): 目标表名
-        execution_mode (str): 执行模式，'append'或'full_refresh'
+        update_mode (str): 更新模式，'append'或'full_refresh'
     
     返回:
         bool: 成功返回True，失败返回False
@@ -338,7 +333,7 @@ def load_file_to_table(file_path, table_name, execution_mode='append'):
         logger.error(f"处理文件 {file_path} 时发生意外错误", exc_info=True)
         return False
 
-def run(table_name, execution_mode='append', exec_date=None, target_type=None, 
+def run(table_name, update_mode='append', exec_date=None, target_type=None, 
         storage_location=None, frequency=None, script_name=None, **kwargs):
     """
     统一入口函数，支持通配符路径，处理并归档文件
@@ -347,10 +342,10 @@ def run(table_name, execution_mode='append', exec_date=None, target_type=None,
         script_name = os.path.basename(__file__)
 
     # 修正之前的日志记录格式错误
-    exec_mode_str = '全量刷新' if execution_mode == 'full_refresh' else '增量追加'
-    logger.info(f"===== 开始执行 {script_name} ({exec_mode_str}) =====")
+    update_mode_str = '全量刷新' if update_mode == 'full_refresh' else '增量追加'
+    logger.info(f"===== 开始执行 {script_name} ({update_mode_str}) =====")
     logger.info(f"表名: {table_name}")
-    logger.info(f"执行模式: {execution_mode}")
+    logger.info(f"更新模式: {update_mode}")
     logger.info(f"执行日期: {exec_date}")
     logger.info(f"目标类型: {target_type}")
     logger.info(f"资源类型: {target_type}, 文件相对路径模式: {storage_location}")
@@ -435,7 +430,7 @@ def run(table_name, execution_mode='append', exec_date=None, target_type=None,
     logger.info(f"总共找到 {len(found_files)} 个匹配文件: {found_files}")
 
     # 如果是全量刷新，在处理任何文件前清空表
-    if execution_mode == 'full_refresh':
+    if update_mode == 'full_refresh':
         conn = None
         cursor = None
         try:
@@ -547,29 +542,23 @@ def run(table_name, execution_mode='append', exec_date=None, target_type=None,
 
 if __name__ == "__main__":
     # 直接执行时的测试代码
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='从CSV或Excel文件加载数据到表（支持通配符）')
+    parser = argparse.ArgumentParser(description='加载文件到表')
     parser.add_argument('--table', type=str, required=True, help='目标表名')
-    parser.add_argument('--pattern', type=str, required=True, help='文件查找模式 (相对于基准上传路径的相对路径，例如: data/*.csv 或 data/*.xlsx 或 data/*)')
-    parser.add_argument('--mode', type=str, default='append', choices=['append', 'full_refresh'], help='执行模式: append 或 full_refresh')
+    parser.add_argument('--file', type=str, required=True, help='文件路径')
+    parser.add_argument('--update-mode', type=str, default='append', choices=['append', 'full_refresh'], help='更新模式: append 或 full_refresh')
     
     args = parser.parse_args()
     
-    # 构造必要的 kwargs
-    run_kwargs = {
+    # 构建参数字典
+    run_args = {
         "table_name": args.table,
-        "execution_mode": args.mode,
-        "storage_location": args.pattern,
-        "target_type": 'structure',
-        "exec_date": datetime.now().strftime('%Y-%m-%d'),
-        "frequency": "manual",
-        "script_name": os.path.basename(__file__)
+        "update_mode": args.update_mode,
+        "storage_location": args.file
     }
 
-    logger.info("命令行测试执行参数: " + str(run_kwargs))
+    logger.info("命令行测试执行参数: " + str(run_args))
 
-    success = run(**run_kwargs)
+    success = run(**run_args)
     
     if success:
         print("文件加载任务执行完毕，所有文件处理成功。")

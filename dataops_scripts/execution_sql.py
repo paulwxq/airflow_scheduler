@@ -29,15 +29,16 @@ if current_dir not in sys.path:
 # 尝试导入script_utils
 try:
     import script_utils
-    logger.info("成功导入script_utils模块")
+    from script_utils import get_pg_config, logger as utils_logger
+    logger.info("成功导入script_utils模块的get_pg_config方法")
 except ImportError as e:
-    logger.error(f"无法直接导入script_utils: {str(e)}")
+    logger.error(f"无法直接导入script_utils方法: {str(e)}")
     
     # 尝试备用方法1：完整路径导入
     try:
         sys.path.append(os.path.dirname(current_dir))  # 添加父目录
-        import dataops_scripts.script_utils as script_utils
-        logger.info("使用完整路径成功导入script_utils模块")
+        from dataops_scripts.script_utils import get_pg_config
+        logger.info("使用完整路径成功导入script_utils模块的方法")
     except ImportError as e2:
         logger.error(f"使用完整路径导入失败: {str(e2)}")
         
@@ -50,42 +51,27 @@ except ImportError as e:
             spec = importlib.util.spec_from_file_location("script_utils", script_utils_path)
             script_utils = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(script_utils)
-            logger.info("通过动态导入成功加载script_utils模块")
+            get_pg_config = script_utils.get_pg_config
+            logger.info("通过动态导入成功加载script_utils模块的方法")
         except Exception as e3:
             logger.error(f"动态导入也失败: {str(e3)}")
-            raise ImportError(f"无法导入script_utils模块，所有方法都失败")
+            raise ImportError(f"无法导入script_utils模块的方法，所有方法都失败")
 
-# 添加健壮的导入机制
-def get_config():
-    """
-    从config模块导入配置
-    
-    返回:
-        dict: PG_CONFIG 数据库连接配置
-    """
+# 使用script_utils中的方法获取配置
+try:
+    # 获取PostgreSQL配置
+    PG_CONFIG = get_pg_config()
+    logger.info(f"通过script_utils.get_pg_config()获取PostgreSQL配置成功")
+except Exception as e:
+    logger.error(f"获取配置失败，使用默认值: {str(e)}")
     # 默认配置
-    default_pg_config = {
+    PG_CONFIG = {
         "host": "localhost",
         "port": 5432,
         "user": "postgres",
         "password": "postgres",
         "database": "dataops",
     }
-    
-    try:
-        # 动态导入，避免IDE警告
-        config = __import__('config')
-        logger.info("从config模块直接导入配置")
-        pg_config = getattr(config, 'PG_CONFIG', default_pg_config)
-        return pg_config
-    except ImportError:
-        # 使用默认配置
-        logger.warning("无法导入config模块，使用默认值")
-        return default_pg_config
-
-# 导入配置
-PG_CONFIG = get_config()
-logger.info(f"配置加载完成: 数据库连接={PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['database']}")
 
 def get_pg_conn():
     """获取PostgreSQL连接"""
@@ -324,9 +310,9 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
         
         # 检查是否开启ETL幂等性
         target_table_label = kwargs.get('target_table_label', '')
-        script_exec_mode = kwargs.get('execution_mode', 'append')  # 默认为append
+        script_exec_mode = kwargs.get('update_mode', 'append')  # 只使用update_mode
         
-        logger.info(f"脚本执行模式: {script_exec_mode}")
+        logger.info(f"脚本更新模式: {script_exec_mode}")
         
         # 导入config模块获取幂等性开关
         try:
@@ -403,7 +389,7 @@ WHERE {target_dt_column} >= '{{{{ start_date }}}}'
                     logger.warning("TRUNCATE失败，继续执行原始SQL")
             
             else:
-                logger.info(f"当前执行模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
+                logger.info(f"当前更新模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
         else:
             logger.info("未满足ETL幂等性处理条件，直接执行原始SQL")
         

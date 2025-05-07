@@ -21,18 +21,18 @@ def get_pg_conn():
 
 
 
-def execute_script(script_name=None, table_name=None, execution_mode=None, script_path=None, script_exec_mode=None, args=None):
+def execute_script(script_name=None, table_name=None, update_mode=None, script_path=None, script_exec_mode=None, args=None):
     """
     根据脚本名称动态导入并执行对应的脚本
     支持两种调用方式:
-    1. execute_script(script_name, table_name, execution_mode) - 原始实现
+    1. execute_script(script_name, table_name, update_mode) - 原始实现
     2. execute_script(script_path, script_name, script_exec_mode, args={}) - 来自common.py的实现
         
     返回:
         bool: 执行成功返回True，否则返回False
     """
     # 第一种调用方式 - 原始函数实现
-    if script_name and table_name and execution_mode is not None and script_path is None and script_exec_mode is None:
+    if script_name and table_name and update_mode is not None and script_path is None and script_exec_mode is None:
         if not script_name:
             logger.error("未提供脚本名称，无法执行")
             return False
@@ -50,7 +50,7 @@ def execute_script(script_name=None, table_name=None, execution_mode=None, scrip
             # 使用标准入口函数run
             if hasattr(module, "run"):
                 logger.info(f"执行脚本 {script_name} 的标准入口函数 run()")
-                module.run(table_name=table_name, execution_mode=execution_mode)
+                module.run(table_name=table_name, update_mode=update_mode)
                 return True
             else:
                 logger.warning(f"脚本 {script_name} 未定义标准入口函数 run()，无法执行")
@@ -66,10 +66,10 @@ def execute_script(script_name=None, table_name=None, execution_mode=None, scrip
             # 第二种调用方式 - 显式提供所有参数
             if args is None:
                 args = {}
-        elif script_name and table_name and execution_mode is not None:
+        elif script_name and table_name and update_mode is not None:
             # 第二种调用方式 - 但使用第一种调用方式的参数名
             script_path = os.path.join(SCRIPTS_BASE_PATH, f"{script_name}.py")
-            script_exec_mode = execution_mode
+            script_exec_mode = update_mode
             args = {"table_name": table_name}
         else:
             logger.error("参数不正确，无法执行脚本")
@@ -105,7 +105,7 @@ def execute_script(script_name=None, table_name=None, execution_mode=None, scrip
             # 执行脚本
             if table_name is not None:
                 # 使用table_name参数调用
-                exec_result = module.run(table_name=table_name, execution_mode=script_exec_mode)
+                exec_result = module.run(table_name=table_name, update_mode=script_exec_mode)
             else:
                 # 使用script_exec_mode和args调用
                 exec_result = module.run(script_exec_mode, args)
@@ -160,10 +160,19 @@ def get_dependency_resource_tables(enabled_tables: list) -> list:
 
 # 从 PostgreSQL 获取启用的表，按调度频率 daily/weekly/monthly 过滤
 def get_enabled_tables(frequency: str) -> list:
+    """
+    从PostgreSQL获取启用的表，按调度频率daily/weekly/monthly过滤
+    
+    参数:
+        frequency (str): 调度频率，如daily, weekly, monthly
+        
+    返回:
+        list: 包含表名和执行模式的列表
+    """
     conn = get_pg_conn()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT table_name, execution_mode
+        SELECT table_name, update_mode
         FROM table_schedule
         WHERE is_enabled = TRUE AND schedule_frequency = %s
     """, (frequency,))
@@ -173,7 +182,7 @@ def get_enabled_tables(frequency: str) -> list:
 
     output = []
     for r in result:
-        output.append({"table_name": r[0], "execution_mode": r[1]})
+        output.append({"table_name": r[0], "update_mode": r[1]})
     return output
 
 # 判断给定表名是否是 Neo4j 中的 DataResource 类型
@@ -293,66 +302,55 @@ def check_script_exists(script_name):
             
         return False, script_path_str
 
-def run_model_script(table_name, execution_mode):
+def run_model_script(table_name, update_mode):
     """
-    根据表名查找并执行对应的模型脚本
+    执行与表关联的脚本
     
     参数:
-        table_name (str): 要处理的表名
-        execution_mode (str): 执行模式 (append/full_refresh)
-    
+        table_name (str): 表名
+        update_mode (str): 更新模式，如append, full_refresh等
+        
     返回:
         bool: 执行成功返回True，否则返回False
-        
-    抛出:
-        AirflowFailException: 如果脚本不存在或执行失败
     """
-    # 从Neo4j获取脚本名称
-    script_name = get_script_name_from_neo4j(table_name)
-    if not script_name:
-        error_msg = f"未找到表 {table_name} 的脚本名称，任务失败"
-        logger.error(error_msg)
-        raise AirflowFailException(error_msg)
+    logger.info(f"执行表 {table_name} 关联的脚本")
     
-    logger.info(f"从Neo4j获取到表 {table_name} 的脚本名称: {script_name}")
+    # 检查表类型
+    is_model = is_data_model_table(table_name)
     
-    # 检查脚本文件是否存在
-    exists, script_path = check_script_exists(script_name)
-    if not exists:
-        error_msg = f"表 {table_name} 的脚本文件 {script_name} 不存在，任务失败"
-        logger.error(error_msg)
-        raise AirflowFailException(error_msg)
-    
-    # 执行脚本
-    logger.info(f"开始执行脚本: {script_path}")
-    try:
-        # 动态导入模块
-        import importlib.util
-        import sys
+    if is_model:
+        # 从Neo4j获取脚本名称
+        script_name = get_script_name_from_neo4j(table_name)
+        if not script_name:
+            logger.error(f"未找到表 {table_name} 关联的脚本")
+            return False
+            
+        logger.info(f"查询到表 {table_name} 关联的脚本: {script_name}")
         
-        spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # 检查脚本文件是否存在
+        script_exists, script_path = check_script_exists(script_name)
         
-        # 检查并调用标准入口函数run
-        if hasattr(module, "run"):
-            logger.info(f"调用脚本 {script_name} 的标准入口函数 run()")
-            module.run(table_name=table_name, execution_mode=execution_mode)
-            logger.info(f"脚本 {script_name} 执行成功")
-            return True
-        else:
-            error_msg = f"脚本 {script_name} 中未定义标准入口函数 run()，任务失败"
-            logger.error(error_msg)
-            raise AirflowFailException(error_msg)
-    except AirflowFailException:
-        # 直接重新抛出Airflow异常
-        raise
-    except Exception as e:
-        error_msg = f"执行脚本 {script_name} 时出错: {str(e)}"
-        logger.error(error_msg)
-        import traceback
-        logger.error(traceback.format_exc())
-        raise AirflowFailException(error_msg)
+        if not script_exists:
+            logger.error(f"脚本文件 {script_name} 不存在")
+            return False
+        
+        logger.info(f"脚本文件路径: {script_path}")
+        
+        # 执行脚本
+        try:
+            # 包含PY扩展名时，确保使用完整文件名
+            if not script_name.endswith('.py'):
+                script_name = f"{script_name}.py"
+                
+            return execute_script(script_name=script_name, table_name=table_name, update_mode=update_mode)
+        except Exception as e:
+            logger.error(f"执行脚本 {script_name} 时发生错误: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    else:
+        logger.warning(f"表 {table_name} 不是DataModel类型，跳过脚本执行")
+        return True
 
 
 def get_model_dependency_graph(table_names: list) -> dict:
@@ -637,7 +635,7 @@ def create_task_dict(optimized_table_order, model_tables, dag, execution_type, *
                 task_params = {
                     "task_id": f"process_{execution_type}_{table_name}",
                     "python_callable": run_model_script,
-                    "op_kwargs": {"table_name": table_name, "execution_mode": table_config['execution_mode']},
+                    "op_kwargs": {"table_name": table_name, "update_mode": table_config['update_mode']},
                     "dag": dag
                 }
                 
@@ -911,78 +909,96 @@ def update_task_completion(exec_date, target_table, script_name, success, end_ti
         logger.info("数据库连接已关闭")
         logger.info("===== 更新任务完成信息完成 =====")
 
-def execute_with_monitoring(target_table, script_name, script_exec_mode, exec_date, **kwargs):
-    """执行脚本并监控执行情况"""
-
-    # 添加详细日志
-    logger.info(f"===== 开始监控执行 =====")
-    logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
-    logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
-    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
-    logger.info(f"exec_date: {exec_date}, 类型: {type(exec_date)}")
-
-    # 检查script_name是否为空
-    if not script_name:
-        logger.error(f"表 {target_table} 的script_name为空，无法执行")
-        # 记录执行失败
-        now = datetime.now()
-        update_task_completion(exec_date, target_table, script_name or "", False, now, 0)
-        return False
-    # 记录执行开始时间
+def execute_with_monitoring(target_table, script_name, update_mode, exec_date, **kwargs):
+    """
+    执行脚本并监控执行状态，更新到airflow_exec_plans表
+    
+    参数:
+        target_table: 目标表名
+        script_name: 脚本名称
+        update_mode: 更新模式(append/full_refresh)
+        exec_date: 执行日期
+        **kwargs: 其他参数
+        
+    返回:
+        bool: 执行成功返回True，否则返回False
+    """
+    conn = None
     start_time = datetime.now()
     
-    # 尝试更新开始时间并记录结果
     try:
+        # 记录任务开始执行
         update_task_start_time(exec_date, target_table, script_name, start_time)
-        logger.info(f"成功更新任务开始时间: {start_time}")
-    except Exception as e:
-        logger.error(f"更新任务开始时间失败: {str(e)}")
-    
-    try:
-        # 执行实际脚本
-        logger.info(f"开始执行脚本: {script_name}")
-        result = execute_script(script_name, target_table, script_exec_mode)
-        logger.info(f"脚本执行完成，原始返回值: {result}, 类型: {type(result)}")
         
-        # 确保result是布尔值
-        if result is None:
-            logger.warning(f"脚本返回值为None，转换为False")
-            result = False
-        elif not isinstance(result, bool):
-            original_result = result
-            result = bool(result)
-            logger.warning(f"脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+        # 执行脚本
+        script_path = os.path.join(SCRIPTS_BASE_PATH, script_name)
         
-        # 记录结束时间和结果
+        # 构建执行参数
+        exec_kwargs = {
+            "table_name": target_table,
+            "update_mode": update_mode,
+            "exec_date": exec_date,
+        }
+        
+        # 添加其他传入的参数
+        exec_kwargs.update(kwargs)
+        
+        # 检查脚本是否存在
+        if not os.path.exists(script_path):
+            logger.error(f"脚本文件不存在: {script_path}")
+            success = False
+        else:
+            # 执行脚本
+            try:
+                # 动态导入模块
+                import importlib.util
+                import sys
+                
+                spec = importlib.util.spec_from_file_location("dynamic_module", script_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                
+                # 检查并调用标准入口函数run
+                if hasattr(module, "run"):
+                    logger.info(f"调用脚本 {script_name} 的标准入口函数 run()")
+                    result = module.run(**exec_kwargs)
+                    success = bool(result)  # 确保结果是布尔类型
+                else:
+                    logger.error(f"脚本 {script_name} 中未定义标准入口函数 run()")
+                    success = False
+            except Exception as e:
+                logger.error(f"执行脚本 {script_name} 时出错: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                success = False
+        
+        # 记录结束时间
         end_time = datetime.now()
+        
+        # 计算执行时间
         duration = (end_time - start_time).total_seconds()
         
-        # 尝试更新完成状态并记录结果
-        try:
-            logger.info(f"尝试更新完成状态: result={result}, end_time={end_time}, duration={duration}")
-            update_task_completion(exec_date, target_table, script_name, result, end_time, duration)
-            logger.info(f"成功更新任务完成状态，结果: {result}")
-        except Exception as e:
-            logger.error(f"更新任务完成状态失败: {str(e)}")
+        # 更新任务执行结果
+        update_task_completion(exec_date, target_table, script_name, success, end_time, duration)
         
-        logger.info(f"===== 监控执行完成 =====")
-        return result
+        return success
     except Exception as e:
-        # 处理异常
-        logger.error(f"执行任务出错: {str(e)}")
+        # 记录结束时间
         end_time = datetime.now()
+        
+        # 计算执行时间
         duration = (end_time - start_time).total_seconds()
         
-        # 尝试更新失败状态并记录结果
+        # 更新任务执行失败
         try:
-            logger.info(f"尝试更新失败状态: end_time={end_time}, duration={duration}")
             update_task_completion(exec_date, target_table, script_name, False, end_time, duration)
-            logger.info(f"成功更新任务失败状态")
-        except Exception as update_e:
-            logger.error(f"更新任务失败状态失败: {str(update_e)}")
+        except Exception as update_err:
+            logger.error(f"更新任务状态失败: {str(update_err)}")
         
-        logger.info(f"===== 监控执行异常结束 =====")
-        raise e
+        logger.error(f"执行脚本 {script_name} 发生未处理的异常: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 def ensure_boolean_result(func):
     """装饰器：确保函数返回布尔值"""
@@ -1033,3 +1049,193 @@ def get_cn_exec_date(logical_date):
     local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
     exec_date = local_logical_date.strftime('%Y-%m-%d')
     return exec_date, local_logical_date
+
+def get_table_label(table_name):
+    """确定表的标签类型（DataModel or DataResource）"""
+    driver = GraphDatabase.driver(
+        NEO4J_CONFIG['uri'], 
+        auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
+    )
+    query = """
+        MATCH (n {en_name: $table_name})
+        RETURN labels(n) AS labels
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query, table_name=table_name)
+            record = result.single()
+            if record and record.get("labels"):
+                labels = record.get("labels")
+                if "DataModel" in labels:
+                    return "DataModel"
+                elif "DataResource" in labels:
+                    return "DataResource"
+                elif "DataSource" in labels:
+                    return "DataSource"
+            return None
+    except Exception as e:
+        logger.error(f"获取表 {table_name} 的标签时出错: {str(e)}")
+        return None
+    finally:
+        driver.close()
+
+def get_complete_script_info(script_name=None, target_table=None):
+    """
+    一次性从Neo4j获取脚本和表的完整信息，包括update_mode, schedule_frequency等
+    
+    参数:
+        script_name (str, optional): 脚本名称
+        target_table (str): 目标表名
+        
+    返回:
+        dict: 包含完整脚本信息的字典
+    """
+    if not target_table:
+        return None
+        
+    logger.info(f"从Neo4j获取表 {target_table} 的完整信息")
+    
+    # 连接Neo4j
+    driver = GraphDatabase.driver(
+        NEO4J_CONFIG['uri'], 
+        auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
+    )
+    
+    # 获取表的标签类型
+    table_label = get_table_label(target_table)
+    
+    script_info = {
+        'script_name': script_name,
+        'target_table': target_table,
+        'script_id': f"{script_name.replace('.', '_') if script_name else ''}_{target_table}",
+        'target_table_label': table_label,
+        'source_tables': [],
+        'script_type': 'python_script',  # 默认类型
+        'update_mode': 'append',  # 默认更新模式
+        'schedule_frequency': 'daily',  # 默认调度频率
+        'schedule_status': 'enabled'  # 默认调度状态
+    }
+    
+    try:
+        with driver.session() as session:
+            # 检查是否为structure类型的DataResource
+            if table_label == 'DataResource':
+                query_structure = """
+                    MATCH (n:DataResource {en_name: $table_name})
+                    RETURN n.type AS type, n.storage_location AS storage_location, 
+                           n.schedule_frequency AS schedule_frequency,
+                           n.update_mode AS update_mode,
+                           n.schedule_status AS schedule_status
+                """
+                
+                result = session.run(query_structure, table_name=target_table)
+                record = result.single()
+                
+                if record and record.get("type") == "structure":
+                    logger.info(f"表 {target_table} 是structure类型的DataResource")
+                    
+                    # 设置特殊属性
+                    script_info['target_type'] = 'structure'
+                    
+                    # 从节点属性获取信息
+                    if record.get("storage_location"):
+                        script_info['storage_location'] = record.get("storage_location")
+                    
+                    # 获取调度频率
+                    if record.get("schedule_frequency"):
+                        script_info['schedule_frequency'] = record.get("schedule_frequency")
+                    
+                    # 获取更新模式
+                    if record.get("update_mode"):
+                        script_info['update_mode'] = record.get("update_mode")
+                    
+                    # 获取调度状态
+                    if record.get("schedule_status"):
+                        script_info['schedule_status'] = record.get("schedule_status")
+                    
+                    # 如果没有指定脚本名称或指定的是default，则设置为load_file.py
+                    if not script_name or script_name.lower() == 'default' or script_name == 'load_file.py':
+                        script_info['script_name'] = 'load_file.py'
+                        script_info['script_id'] = f"load_file_py_{target_table}"
+                        return script_info
+            
+            # 非structure类型，或structure类型但有指定脚本名称
+            # 根据表标签类型查询脚本信息和依赖关系
+            if script_info['target_table_label'] == 'DataModel':
+                # 查询DataModel的所有属性和依赖
+                query = """
+                    MATCH (target:DataModel {en_name: $table_name})-[rel:DERIVED_FROM]->(source)
+                    RETURN source.en_name AS source_table, 
+                           rel.script_name AS script_name, 
+                           rel.script_type AS script_type,
+                           rel.update_mode AS update_mode,
+                           rel.schedule_frequency AS schedule_frequency,
+                           rel.schedule_status AS schedule_status
+                """
+                result = session.run(query, table_name=target_table)
+                
+                for record in result:
+                    source_table = record.get("source_table")
+                    db_script_name = record.get("script_name")
+                    
+                    # 验证脚本名称匹配或未指定脚本名称
+                    if not script_name or (db_script_name and db_script_name == script_name):
+                        if source_table and source_table not in script_info['source_tables']:
+                            script_info['source_tables'].append(source_table)
+                        
+                        # 只在匹配脚本名称时更新这些属性
+                        if db_script_name and db_script_name == script_name:
+                            # 更新脚本信息
+                            script_info['script_type'] = record.get("script_type", script_info['script_type'])
+                            script_info['update_mode'] = record.get("update_mode", script_info['update_mode'])
+                            script_info['schedule_frequency'] = record.get("schedule_frequency", script_info['schedule_frequency'])
+                            script_info['schedule_status'] = record.get("schedule_status", script_info['schedule_status'])
+                            
+                            # 如果未指定脚本名称，则使用查询到的脚本名称
+                            if not script_info['script_name'] and db_script_name:
+                                script_info['script_name'] = db_script_name
+                                script_info['script_id'] = f"{db_script_name.replace('.', '_')}_{target_table}"
+            
+            elif script_info['target_table_label'] == 'DataResource':
+                # 查询DataResource的所有属性和依赖
+                query = """
+                    MATCH (target:DataResource {en_name: $table_name})-[rel:ORIGINATES_FROM]->(source)
+                    RETURN source.en_name AS source_table, 
+                           rel.script_name AS script_name, 
+                           rel.script_type AS script_type,
+                           rel.update_mode AS update_mode,
+                           rel.schedule_frequency AS schedule_frequency,
+                           rel.schedule_status AS schedule_status
+                """
+                result = session.run(query, table_name=target_table)
+                
+                for record in result:
+                    source_table = record.get("source_table")
+                    db_script_name = record.get("script_name")
+                    
+                    # 验证脚本名称匹配或未指定脚本名称
+                    if not script_name or (db_script_name and db_script_name == script_name):
+                        if source_table and source_table not in script_info['source_tables']:
+                            script_info['source_tables'].append(source_table)
+                        
+                        # 只在匹配脚本名称时更新这些属性
+                        if db_script_name and db_script_name == script_name:
+                            # 更新脚本信息
+                            script_info['script_type'] = record.get("script_type", script_info['script_type'])
+                            script_info['update_mode'] = record.get("update_mode", script_info['update_mode'])
+                            script_info['schedule_frequency'] = record.get("schedule_frequency", script_info['schedule_frequency'])
+                            script_info['schedule_status'] = record.get("schedule_status", script_info['schedule_status'])
+                            
+                            # 如果未指定脚本名称，则使用查询到的脚本名称
+                            if not script_info['script_name'] and db_script_name:
+                                script_info['script_name'] = db_script_name
+                                script_info['script_id'] = f"{db_script_name.replace('.', '_')}_{target_table}"
+    
+    except Exception as e:
+        logger.error(f"从Neo4j获取表 {target_table} 的信息时出错: {str(e)}")
+    finally:
+        if driver:
+            driver.close()
+    
+    logger.info(f"获取到完整脚本信息: {script_info}")
+    return script_info

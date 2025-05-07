@@ -16,7 +16,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("load_file_mock") # 使用 mock 后缀以区分
 
-def mock_load_file(table_name=None, execution_mode='append', exec_date=None, 
+def mock_load_file(table_name=None, update_mode='append', exec_date=None, 
                    target_type=None, storage_location=None, frequency=None, script_name=None, **kwargs):
     """模拟加载文件数据，仅打印参数"""
     # 获取当前脚本的文件名（如果没有传入）
@@ -26,7 +26,7 @@ def mock_load_file(table_name=None, execution_mode='append', exec_date=None,
     # 打印所有传入的参数
     logger.info(f"===== 传入参数信息 (模拟处理函数内) =====")
     logger.info(f"table_name: {table_name}")
-    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"update_mode: {update_mode}")
     logger.info(f"exec_date: {exec_date}")
     logger.info(f"target_type: {target_type}")
     logger.info(f"storage_location: {storage_location}")
@@ -46,8 +46,8 @@ def mock_load_file(table_name=None, execution_mode='append', exec_date=None,
         else:
             logger.info(f"模拟检查文件是否存在: {storage_location}")
 
-        logger.info(f"模拟执行模式: {execution_mode}")
-        if execution_mode == 'full_refresh':
+        logger.info(f"模拟更新模式: {update_mode}")
+        if update_mode == 'full_refresh':
             logger.info(f"模拟: 如果是全量刷新，将清空表 {table_name}")
         
         logger.info("模拟读取和处理文件...")
@@ -58,14 +58,14 @@ def mock_load_file(table_name=None, execution_mode='append', exec_date=None,
         logger.error(f"模拟加载文件时出错: {str(e)}")
         return False
 
-def run(table_name, execution_mode='append', exec_date=None, target_type=None, 
+def run(table_name, update_mode='append', exec_date=None, target_type=None, 
         storage_location=None, frequency=None, script_name=None, **kwargs):
     """
     统一入口函数，符合Airflow动态脚本调用规范 (模拟版本)
 
     参数:
         table_name (str): 要处理的表名
-        execution_mode (str): 执行模式 (append/full_refresh)
+        update_mode (str): 更新模式 (append/full_refresh)
         exec_date: 执行日期
         target_type: 目标类型
         storage_location: 文件路径
@@ -79,7 +79,7 @@ def run(table_name, execution_mode='append', exec_date=None, target_type=None,
     # 打印所有传入的参数 (在入口函数再次打印，确保信息完整)
     logger.info(f"===== 传入参数信息 (入口函数 run 内) =====")
     logger.info(f"table_name: {table_name}")
-    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"update_mode: {update_mode}")
     logger.info(f"exec_date: {exec_date} (类型: {type(exec_date)}) ")
     logger.info(f"target_type: {target_type}")
     logger.info(f"storage_location: {storage_location}")
@@ -101,7 +101,7 @@ def run(table_name, execution_mode='append', exec_date=None, target_type=None,
     # 调用实际处理函数 (模拟版本)
     result = mock_load_file(
         table_name=table_name,
-        execution_mode=execution_mode,
+        update_mode=update_mode,
         exec_date=exec_date,
         target_type=target_type,
         storage_location=storage_location,
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     # 提供一些默认值以便直接运行脚本进行测试
     test_params = {
         "table_name": "sample_table",
-        "execution_mode": "full_refresh",
+        "update_mode": "full_refresh",
         "exec_date": datetime.now().strftime('%Y-%m-%d'),
         "target_type": "structure",
         "storage_location": "/path/to/mock/file.csv",
