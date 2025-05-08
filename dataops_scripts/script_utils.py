@@ -4,6 +4,7 @@
 import logging
 import sys
 import os
+import traceback
 
 # 添加父目录到Python路径，以便能导入dags目录下的config模块
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -85,6 +86,47 @@ def load_config_module():
     except Exception as e:
         logger.error(f"加载配置模块时出错: {str(e)}")
         raise ImportError(f"无法加载配置模块: {str(e)}")
+    
+def get_neo4j_driver():
+    """获取Neo4j连接驱动"""
+    try:
+        # 使用get_config_path获取config路径
+        config_path = get_config_path()
+        
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            
+        logger.info(f"使用配置文件路径: {config_path}")
+        
+        # 动态加载config模块
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        
+        # 从模块中获取NEO4J_CONFIG
+        NEO4J_CONFIG = getattr(config_module, "NEO4J_CONFIG", None)
+        
+        if not NEO4J_CONFIG:
+            raise ValueError(f"配置文件 {config_path} 中未找到NEO4J_CONFIG配置项")
+            
+        # 验证NEO4J_CONFIG中包含必要的配置项
+        required_keys = ["uri", "user", "password"]
+        missing_keys = [key for key in required_keys if key not in NEO4J_CONFIG]
+        
+        if missing_keys:
+            raise ValueError(f"NEO4J_CONFIG缺少必要的配置项: {', '.join(missing_keys)}")
+        
+        # 创建Neo4j驱动
+        from neo4j import GraphDatabase
+        logger.info(f"使用配置创建Neo4j驱动: {NEO4J_CONFIG['uri']}")
+        return GraphDatabase.driver(
+            NEO4J_CONFIG['uri'], 
+            auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
+        )
+    except Exception as e:
+        logger.error(f"创建Neo4j驱动失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def get_pg_config():
     """
@@ -384,3 +426,89 @@ def get_one_day_range(exec_date):
     # 次日00:00:00
     end_datetime = start_datetime + timedelta(days=1)
     return start_datetime, end_datetime
+
+def get_target_dt_column(table_name, script_name=None):
+    """
+    从Neo4j或data_transform_scripts表获取目标日期列
+    
+    参数:
+        table_name (str): 表名
+        script_name (str, optional): 脚本名称
+        
+    返回:
+        str: 目标日期列名
+    """
+    logger.info(f"获取表 {table_name} 的目标日期列")
+    
+    try:
+        # 首先从Neo4j获取
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            # 尝试从DataModel节点的relations关系属性中获取
+            query = """
+                MATCH (n {en_name: $table_name})
+                RETURN n.target_dt_column AS target_dt_column
+            """
+            
+            result = session.run(query, table_name=table_name)
+            record = result.single()
+            
+            if record and record.get("target_dt_column"):
+                target_dt_column = record.get("target_dt_column")
+                logger.info(f"从Neo4j获取到表 {table_name} 的目标日期列: {target_dt_column}")
+                return target_dt_column
+        
+        # 导入需要的模块以连接数据库
+        import sqlalchemy
+        from sqlalchemy import create_engine, text
+        
+        # Neo4j中找不到，尝试从data_transform_scripts表获取
+        # 获取目标数据库连接
+        pg_config = get_pg_config()
+        
+        if not pg_config:
+            logger.error("无法获取PG_CONFIG配置，无法连接数据库查询目标日期列")
+            return None
+            
+        # 创建数据库引擎
+        db_url = f"postgresql://{pg_config['user']}:{pg_config['password']}@{pg_config['host']}:{pg_config['port']}/{pg_config['database']}"
+        engine = create_engine(db_url)
+        
+        if not engine:
+            logger.error("无法创建数据库引擎，无法获取目标日期列")
+            return None
+        
+        # 查询data_transform_scripts表
+        try:
+            query = f"""
+                SELECT target_dt_column
+                FROM data_transform_scripts
+                WHERE target_table = '{table_name}'
+            """
+            if script_name:
+                query += f" AND script_name = '{script_name}'"
+            
+            query += " LIMIT 1"
+            
+            with engine.connect() as conn:
+                result = conn.execute(text(query))
+                row = result.fetchone()
+                
+                if row and row[0]:
+                    target_dt_column = row[0]
+                    logger.info(f"从data_transform_scripts表获取到表 {table_name} 的目标日期列: {target_dt_column}")
+                    return target_dt_column
+        except Exception as db_err:
+            logger.error(f"从data_transform_scripts表获取目标日期列时出错: {str(db_err)}")
+            logger.error(traceback.format_exc())
+        
+        # 都找不到，使用默认值
+        logger.warning(f"未找到表 {table_name} 的目标日期列，将使用默认值 'data_date'")
+        return "data_date"
+    except Exception as e:
+        logger.error(f"获取目标日期列时出错: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+    finally:
+        if 'driver' in locals() and driver:
+            driver.close()
