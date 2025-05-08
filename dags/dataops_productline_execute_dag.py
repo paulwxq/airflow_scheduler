@@ -545,10 +545,12 @@ def check_execution_plan(**kwargs):
     exec_date, local_logical_date = get_cn_exec_date(logical_date)
     
     # 检查是否是手动触发
-    is_manual_trigger = dag_run.conf.get('MANUAL_TRIGGER', False) if dag_run.conf else False
-    if is_manual_trigger:
+    dag_run = kwargs['dag_run']
+    logger.info(f"This DAG run was triggered via: {dag_run.run_type}")
+
+    if dag_run.external_trigger:
         logger.info(f"【手动触发】当前DAG是手动触发的，使用传入的logical_date: {logical_date}")
-    
+       
     # 记录重要的时间参数
     logger.info(f"【时间参数】check_execution_plan: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
     logger.info("检查数据库中的执行计划是否存在且有效")
@@ -947,10 +949,10 @@ def create_execution_plan(**kwargs):
         dag_run = kwargs.get('dag_run')
         logical_date = dag_run.logical_date
         exec_date, local_logical_date = get_cn_exec_date(logical_date)
-        
+
+        logger.info(f"This DAG run was triggered via: {dag_run.run_type}")        
         # 检查是否是手动触发
-        is_manual_trigger = dag_run.conf.get('MANUAL_TRIGGER', False) if dag_run.conf else False
-        if is_manual_trigger:
+        if dag_run.external_trigger:
             logger.info(f"【手动触发】当前DAG是手动触发的，使用传入的logical_date: {logical_date}")
         
         # 记录重要的时间参数
@@ -961,7 +963,7 @@ def create_execution_plan(**kwargs):
         
         # 如果找不到执行计划，则从数据库获取
         if not execution_plan:
-            logger.info(f"未找到执行计划，从数据库获取。使用执行日期: {exec_date}")
+            logger.info(f"未从XCom中找到执行计划，从数据库获取。使用执行日期: {exec_date}")
             execution_plan = get_execution_plan_from_db(exec_date)
             
             if not execution_plan:
@@ -1004,9 +1006,7 @@ with DAG(
         'retries': 1,
         'retry_delay': timedelta(minutes=5)
     },
-    params={
-        'MANUAL_TRIGGER': False, 
-    }
+    params={"TRIGGERED_VIA_UI": True},# 触发 UI 弹出配置页面
 ) as dag:
     
     # 记录DAG实例化时的重要信息
