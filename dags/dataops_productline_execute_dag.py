@@ -6,12 +6,44 @@
 2. 基于dataops_productline_prepare_dag生成的执行计划执行脚本
 3. 支持对脚本执行顺序的优化
 4. 提供详细的执行日志和错误处理
+
+预期的执行计划模式：
+{
+    "version": "2.0",
+    "exec_date": "YYYY-MM-DD",
+    "scripts": [
+        {
+            "task_id": "唯一任务ID",
+            "script_id": "唯一脚本ID",
+            "script_name": "脚本文件名或标识符",
+            "script_type": "python|sql|python_script",
+            "target_type": "structure|null",
+            "update_mode": "append|full_refresh",
+            "target_table": "表名",
+            "source_tables": ["表1", "表2"],
+            "schedule_status": true,
+            "storage_location": "/路径/模式" 或 null,
+            "schedule_frequency": "daily|weekly|monthly|quarterly|yearly",
+            "target_table_label": "DataModel|DataResource|DataSource"
+        },
+        ...
+    ],
+    "model_scripts": ["script_id1", "script_id2", ...],
+    "resource_scripts": ["script_id3", "script_id4", ...],
+    "execution_order": ["script_id1", "script_id3", "script_id2", "script_id4", ...],
+    "script_dependencies": {
+        "script_id1": ["script_id3", "script_id4"],
+        "script_id2": [],
+        ...
+    }
+}
 """
 from airflow import DAG
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta, date
+from airflow.models import Variable
 import logging
 import networkx as nx
 import json
@@ -72,7 +104,7 @@ class DecimalEncoder(json.JSONEncoder):
 # 脚本执行函数
 #############################################
 
-def execute_python_script(script_id, script_name, target_table, script_exec_mode, frequency, **kwargs):
+def execute_python_script(script_id, script_name, target_table, update_mode, schedule_frequency, **kwargs):
     """
     执行Python脚本文件并返回执行结果
     
@@ -80,8 +112,8 @@ def execute_python_script(script_id, script_name, target_table, script_exec_mode
         script_id: 脚本ID
         script_name: 脚本文件名（.py文件）
         target_table: 目标表名
-        script_exec_mode: 执行模式
-        frequency: 执行频率
+        update_mode: 执行模式
+        schedule_frequency: 执行频率
         **kwargs: 其他参数，如source_tables、target_type等
     
     返回:
@@ -96,8 +128,8 @@ def execute_python_script(script_id, script_name, target_table, script_exec_mode
     logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
     logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
     logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
-    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
-    logger.info(f"frequency: {frequency}, 类型: {type(frequency)}")
+    logger.info(f"update_mode: {update_mode}, 类型: {type(update_mode)}")
+    logger.info(f"schedule_frequency: {schedule_frequency}, 类型: {type(schedule_frequency)}")
     logger.info(f"【时间参数】execute_python_script: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
 
     # 记录额外参数
@@ -133,9 +165,9 @@ def execute_python_script(script_id, script_name, target_table, script_exec_mode
             # 构建完整的参数字典
             run_params = {
                 "table_name": target_table,
-                "execution_mode": script_exec_mode,
+                "execution_mode": update_mode,
                 "exec_date": exec_date,
-                "frequency": frequency
+                "schedule_frequency": schedule_frequency
             }
 
             ## 添加可能的额外参数
@@ -180,7 +212,7 @@ def execute_python_script(script_id, script_name, target_table, script_exec_mode
         return False
 
 # 使用execute_sql函数代替之前的execute_sql_script
-def execute_sql(script_id, script_name, target_table, script_exec_mode, frequency, **kwargs):
+def execute_sql(script_id, script_name, target_table, update_mode, schedule_frequency, **kwargs):
     """
     执行SQL脚本并返回执行结果
     
@@ -188,8 +220,8 @@ def execute_sql(script_id, script_name, target_table, script_exec_mode, frequenc
         script_id: 脚本ID
         script_name: 脚本名称(数据库中的名称)
         target_table: 目标表名
-        script_exec_mode: 执行模式
-        frequency: 执行频率
+        update_mode: 执行模式
+        schedule_frequency: 执行频率
         **kwargs: 其他参数
     
     返回:
@@ -204,8 +236,8 @@ def execute_sql(script_id, script_name, target_table, script_exec_mode, frequenc
     logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
     logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
     logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
-    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
-    logger.info(f"frequency: {frequency}, 类型: {type(frequency)}")
+    logger.info(f"update_mode: {update_mode}, 类型: {type(update_mode)}")
+    logger.info(f"schedule_frequency: {schedule_frequency}, 类型: {type(schedule_frequency)}")
     logger.info(f"【时间参数】execute_sql: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
 
     # 记录额外参数
@@ -249,9 +281,9 @@ def execute_sql(script_id, script_name, target_table, script_exec_mode, frequenc
                 "target_table": target_table,
                 "script_name": script_name,
                 "exec_date": exec_date,
-                "frequency": frequency,
+                "schedule_frequency": schedule_frequency,
                 "target_table_label": kwargs.get('target_table_label', ''), # 传递目标表标签，用于ETL幂等性判断
-                "execution_mode": script_exec_mode  # 传递执行模式参数
+                "update_mode": update_mode  # 传递执行模式参数
             }
 
             # 添加可能的额外参数
@@ -297,7 +329,7 @@ def execute_sql(script_id, script_name, target_table, script_exec_mode, frequenc
         return False
 
 # 使用execute_python函数代替之前的execute_python_script
-def execute_python(script_id, script_name, target_table, script_exec_mode, frequency, **kwargs):
+def execute_python(script_id, script_name, target_table, update_mode, schedule_frequency, **kwargs):
     """
     执行Python脚本并返回执行结果
     
@@ -305,8 +337,8 @@ def execute_python(script_id, script_name, target_table, script_exec_mode, frequ
         script_id: 脚本ID
         script_name: 脚本名称(数据库中的名称)
         target_table: 目标表名
-        script_exec_mode: 执行模式
-        frequency: 执行频率
+        update_mode: 执行模式
+        schedule_frequency: 执行频率
         **kwargs: 其他参数
     
     返回:
@@ -321,8 +353,8 @@ def execute_python(script_id, script_name, target_table, script_exec_mode, frequ
     logger.info(f"script_id: {script_id}, 类型: {type(script_id)}")
     logger.info(f"script_name: {script_name}, 类型: {type(script_name)}")
     logger.info(f"target_table: {target_table}, 类型: {type(target_table)}")
-    logger.info(f"script_exec_mode: {script_exec_mode}, 类型: {type(script_exec_mode)}")
-    logger.info(f"frequency: {frequency}, 类型: {type(frequency)}")
+    logger.info(f"update_mode: {update_mode}, 类型: {type(update_mode)}")
+    logger.info(f"schedule_frequency: {schedule_frequency}, 类型: {type(schedule_frequency)}")
     logger.info(f"【时间参数】execute_python: exec_date={exec_date}, logical_date={logical_date}, local_logical_date={local_logical_date}")
 
     # 记录额外参数
@@ -366,9 +398,9 @@ def execute_python(script_id, script_name, target_table, script_exec_mode, frequ
                 "target_table": target_table,
                 "script_name": script_name,
                 "exec_date": exec_date,
-                "frequency": frequency,
+                "schedule_frequency": schedule_frequency,
                 "target_table_label": kwargs.get('target_table_label', ''), # 传递目标表标签
-                "execution_mode": script_exec_mode  # 传递执行模式参数
+                "update_mode": update_mode  # 传递执行模式参数
             }
 
             # 添加可能的额外参数
@@ -538,53 +570,344 @@ def check_execution_plan(**kwargs):
         logger.error("执行计划的scripts字段无效")
         return False
         
-    if not isinstance(execution_plan.get("script_dependencies", {}), dict):
-        logger.error("执行计划的script_dependencies字段无效")
+    if not isinstance(execution_plan.get("resource_scripts", []), list):
+        logger.error("执行计划的resource_scripts字段无效")
+        return False
+
+    if not isinstance(execution_plan.get("model_scripts", []), list):
+        logger.error("执行计划的model_scripts字段无效")
         return False
     
     # 检查是否有脚本数据
     scripts = execution_plan.get("scripts", [])
+    resource_scripts = execution_plan.get("resource_scripts", [])
+    model_scripts = execution_plan.get("model_scripts", [])
     
-    if not scripts:
-        logger.warning("执行计划不包含任何脚本")
-        # 如果没有脚本，则阻止下游任务执行
-        return False
-    
-    logger.info(f"执行计划验证成功: 包含 {len(scripts)} 个脚本")
+    logger.info(f"执行计划验证成功: 包含 {len(scripts)} 个脚本，{len(resource_scripts)} 个资源脚本和 {len(model_scripts)} 个模型脚本")
     
     # 保存执行计划到XCom以便下游任务使用
     kwargs['ti'].xcom_push(key='execution_plan', value=execution_plan)
     
     return True
 
-def optimize_execution_order(scripts, script_dependencies):
+def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
     """
-    使用NetworkX优化脚本执行顺序
+    将执行计划保存到airflow_exec_plans表
+    
+    参数:
+        execution_plan (dict): 执行计划字典
+        dag_id (str): DAG的ID
+        run_id (str): DAG运行的ID
+        logical_date (datetime): 逻辑日期
+        ds (str): 日期字符串，格式为YYYY-MM-DD
+    
+    返回:
+        bool: 操作是否成功
+    """
+    try:
+        conn = get_pg_conn()
+        cursor = conn.cursor()
+        
+        try:
+            # 将执行计划转换为JSON字符串
+            plan_json = json.dumps(execution_plan)
+            
+            # 获取本地时间
+            local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+            
+            # 插入记录
+            cursor.execute("""
+                INSERT INTO airflow_exec_plans
+                (dag_id, run_id, logical_date, local_logical_date, exec_date, plan)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (dag_id, run_id, logical_date, local_logical_date, ds, plan_json))
+            
+            conn.commit()
+            logger.info(f"成功将执行计划保存到airflow_exec_plans表，dag_id={dag_id}, run_id={run_id}, exec_date={ds}")
+            return True
+        except Exception as e:
+            logger.error(f"保存执行计划到数据库时出错: {str(e)}")
+            conn.rollback()
+            raise Exception(f"PostgreSQL保存执行计划失败: {str(e)}")
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"连接PostgreSQL数据库失败: {str(e)}")
+        raise Exception(f"无法连接PostgreSQL数据库: {str(e)}")
+
+def generate_task_id(script_name, source_tables, target_table):
+    """
+    根据脚本名和表名生成唯一任务ID
+    
+    参数:
+        script_name (str): 脚本文件名
+        source_tables (list): 源表列表
+        target_table (str): 目标表名
+        
+    返回:
+        str: 唯一的任务ID
+    """
+    # 移除脚本名的文件扩展名
+    script_base = os.path.splitext(script_name)[0]
+    
+    # 对于特殊脚本如load_file.py，直接使用目标表名
+    if script_name.lower() in ['load_file.py']:
+        return f"{script_base}_{target_table}"
+    
+    # 处理源表部分
+    if source_tables:
+        # 将所有源表按字母顺序排序并连接
+        source_part = "_".join(sorted(source_tables))
+        # 生成任务ID: 脚本名_源表_to_目标表
+        return f"{script_base}_{source_part}_to_{target_table}"
+    else:
+        # 没有源表时，只使用脚本名和目标表
+        return f"{script_base}_{target_table}"
+
+def prepare_scripts_from_tables(tables_info):
+    """
+    将表信息转换为脚本信息
+    
+    参数:
+        tables_info (list): 表信息列表
+        
+    返回:
+        list: 脚本信息列表
+    """
+    scripts = []
+    
+    for table in tables_info:
+        target_table = table['target_table']
+        target_table_label = table.get('target_table_label')
+        schedule_frequency = table.get('schedule_frequency')
+        
+        # 处理表的脚本信息
+        if 'scripts_info' in table and table['scripts_info']:
+            # 表有多个脚本
+            for script_name, script_info in table['scripts_info'].items():
+                source_tables = script_info.get('sources', [])
+                script_type = script_info.get('script_type', 'python')
+                update_mode = script_info.get('script_exec_mode', 'append')
+                
+                # 生成任务ID
+                task_id = generate_task_id(script_name, source_tables, target_table)
+                
+                # 创建脚本信息
+                script = {
+                    "script_id": task_id,
+                    "script_name": script_name,
+                    "source_tables": source_tables,
+                    "target_table": target_table,
+                    "target_table_label": target_table_label,
+                    "script_type": script_type,
+                    "update_mode": update_mode,
+                    "schedule_frequency": schedule_frequency,
+                    "task_id": task_id
+                }
+                
+                # 为structure类型添加特殊属性
+                if table.get('target_type') == "structure":
+                    script["target_type"] = "structure"
+                    script["storage_location"] = table.get('storage_location')
+                
+                scripts.append(script)
+                logger.info(f"为表 {target_table} 创建脚本 {script_name}，任务ID: {task_id}")
+        else:
+            # 表只有单个脚本或没有明确指定脚本信息
+            script_name = table.get('script_name')
+            
+            # 如果没有script_name，使用默认值
+            if not script_name:
+                script_name = f"{target_table}_script.py"
+                logger.warning(f"表 {target_table} 没有指定脚本名，使用默认值: {script_name}")
+            
+            source_tables = table.get('source_tables', [])
+            script_type = table.get('script_type', 'python')
+            update_mode = table.get('update_mode', 'append')
+            
+            # 生成任务ID
+            task_id = generate_task_id(script_name, source_tables, target_table)
+            
+            # 创建脚本信息
+            script = {
+                "script_id": task_id,
+                "script_name": script_name,
+                "source_tables": source_tables,
+                "target_table": target_table,
+                "target_table_label": target_table_label,
+                "script_type": script_type,
+                "update_mode": update_mode,
+                "schedule_frequency": schedule_frequency,
+                "task_id": task_id
+            }
+            
+            # 为structure类型添加特殊属性
+            if table.get('target_type') == "structure":
+                script["target_type"] = "structure"
+                script["storage_location"] = table.get('storage_location')
+            
+            scripts.append(script)
+            logger.info(f"为表 {target_table} 创建脚本 {script_name}，任务ID: {task_id}")
+    
+    return scripts
+
+def build_script_dependency_graph(scripts):
+    """
+    处理脚本间的依赖关系
     
     参数:
         scripts (list): 脚本信息列表
-        script_dependencies (dict): 脚本依赖关系字典
         
     返回:
-        list: 优化后的脚本执行顺序（脚本ID列表）
+        tuple: (依赖关系字典, 图对象)
     """
-    logger.info("开始使用NetworkX优化脚本执行顺序")
+    # 打印所有脚本的源表信息，用于调试
+    logger.info("构建脚本依赖图，当前脚本信息:")
+    for script in scripts:
+        script_id = script['script_id']
+        script_name = script['script_name']
+        target_table = script['target_table']
+        source_tables = script['source_tables']
+        logger.info(f"脚本: {script_id} ({script_name}), 目标表: {target_table}, 源表: {source_tables}")
+    
+    # 创建目标表到脚本ID的映射
+    table_to_scripts = {}
+    for script in scripts:
+        target_table = script['target_table']
+        if target_table not in table_to_scripts:
+            table_to_scripts[target_table] = []
+        table_to_scripts[target_table].append(script['script_id'])
+    
+    # 记录表到脚本的映射关系
+    logger.info("表到脚本的映射关系:")
+    for table, script_ids in table_to_scripts.items():
+        logger.info(f"表 {table} 由脚本 {script_ids} 生成")
+    
+    # 创建脚本依赖关系
+    script_dependencies = {}
+    for script in scripts:
+        script_id = script['script_id']
+        source_tables = script['source_tables']
+        target_table = script['target_table']
+        
+        # 初始化依赖列表
+        script_dependencies[script_id] = []
+        
+        # 查找源表对应的脚本
+        if source_tables:
+            logger.info(f"处理脚本 {script_id} 的依赖关系，源表: {source_tables}")
+            for source_table in source_tables:
+                if source_table in table_to_scripts:
+                    # 添加所有生成源表的脚本作为依赖
+                    for source_script_id in table_to_scripts[source_table]:
+                        if source_script_id != script_id:  # 避免自我依赖
+                            script_dependencies[script_id].append(source_script_id)
+                            logger.info(f"添加依赖: {script_id} 依赖于 {source_script_id} (表 {target_table} 依赖于表 {source_table})")
+                else:
+                    logger.warning(f"源表 {source_table} 没有对应的脚本，无法为脚本 {script_id} 创建依赖")
+        else:
+            logger.info(f"脚本 {script_id} 没有源表依赖")
+    
+    # 尝试从Neo4j额外查询依赖关系（如果脚本没有显式的source_tables）
+    try:
+        driver = get_neo4j_driver()
+    except Exception as e:
+        logger.error(f"连接Neo4j数据库失败: {str(e)}")
+        raise Exception(f"无法连接Neo4j数据库: {str(e)}")
+    
+    try:
+        with driver.session() as session:
+            # 验证连接
+            try:
+                test_result = session.run("RETURN 1 as test")
+                test_record = test_result.single()
+                if not test_record or test_record.get("test") != 1:
+                    logger.error("Neo4j连接测试失败")
+                    raise Exception("Neo4j连接测试失败")
+            except Exception as e:
+                logger.error(f"Neo4j连接测试失败: {str(e)}")
+                raise Exception(f"Neo4j连接测试失败: {str(e)}")
+                
+            for script in scripts:
+                script_id = script['script_id']
+                target_table = script['target_table']
+                
+                # 只处理没有源表的脚本
+                if not script['source_tables'] and not script_dependencies[script_id]:
+                    logger.info(f"脚本 {script_id} 没有源表，尝试从Neo4j直接查询表 {target_table} 的依赖")
+                    
+                    # 查询表的直接依赖
+                    query = """
+                        MATCH (target {en_name: $table_name})-[rel]->(dep)
+                        RETURN dep.en_name AS dep_name
+                    """
+                    
+                    try:
+                        result = session.run(query, table_name=target_table)
+                        records = list(result)
+                        
+                        for record in records:
+                            dep_name = record.get("dep_name")
+                            if dep_name and dep_name in table_to_scripts:
+                                for dep_script_id in table_to_scripts[dep_name]:
+                                    if dep_script_id != script_id:  # 避免自我依赖
+                                        script_dependencies[script_id].append(dep_script_id)
+                                        logger.info(f"从Neo4j添加额外依赖: {script_id} 依赖于 {dep_script_id} (表 {target_table} 依赖于表 {dep_name})")
+                    except Exception as e:
+                        logger.warning(f"从Neo4j查询表 {target_table} 依赖时出错: {str(e)}")
+                        raise Exception(f"Neo4j查询表依赖失败: {str(e)}")
+    except Exception as e:
+        if "Neo4j" in str(e):
+            # 已经处理过的错误，直接抛出
+            raise
+        else:
+            logger.error(f"访问Neo4j获取额外依赖时出错: {str(e)}")
+            raise Exception(f"Neo4j依赖查询失败: {str(e)}")
+    finally:
+        driver.close()
     
     # 构建依赖图
     G = nx.DiGraph()
     
     # 添加所有脚本作为节点
     for script in scripts:
-        script_id = script['script_id']
-        G.add_node(script_id)
+        G.add_node(script['script_id'])
     
     # 添加依赖边
     for script_id, dependencies in script_dependencies.items():
-        for dep_id in dependencies:
-            # 添加从script_id到dep_id的边，表示script_id依赖于dep_id
-            G.add_edge(script_id, dep_id)
-            logger.debug(f"添加依赖边: {script_id} -> {dep_id}")
+        if dependencies:
+            for dep_id in dependencies:
+                # 添加从script_id到dep_id的边，表示script_id依赖于dep_id
+                G.add_edge(script_id, dep_id)
+                logger.debug(f"添加依赖边: {script_id} -> {dep_id}")
+        else:
+            logger.info(f"脚本 {script_id} 没有依赖的上游脚本")
     
+    # 确保所有脚本ID都在依赖关系字典中
+    for script in scripts:
+        script_id = script['script_id']
+        if script_id not in script_dependencies:
+            script_dependencies[script_id] = []
+    
+    # 记录每个脚本的依赖数量
+    for script_id, deps in script_dependencies.items():
+        logger.info(f"脚本 {script_id} 有 {len(deps)} 个依赖: {deps}")
+    
+    return script_dependencies, G
+
+def optimize_script_execution_order(scripts, script_dependencies, G):
+    """
+    使用NetworkX优化脚本执行顺序
+    
+    参数:
+        scripts (list): 脚本信息列表
+        script_dependencies (dict): 脚本依赖关系字典
+        G (nx.DiGraph): 依赖图对象
+        
+    返回:
+        list: 优化后的脚本执行顺序（脚本ID列表）
+    """
     # 检查是否有循环依赖
     try:
         cycles = list(nx.simple_cycles(G))
@@ -608,12 +931,13 @@ def optimize_execution_order(scripts, script_dependencies):
         # 反转结果，使上游任务先执行
         execution_order.reverse()
         
-        logger.info(f"NetworkX优化后的脚本执行顺序: {execution_order}")
+        logger.info(f"生成优化的脚本执行顺序: {execution_order}")
         return execution_order
     except Exception as e:
         logger.error(f"生成脚本执行顺序时出错: {str(e)}")
         # 出错时返回原始脚本ID列表，不进行优化
-        return [script['script_id'] for script in scripts]
+        return [script['script_id'] for script in scripts] 
+    
 
 def create_execution_plan(**kwargs):
     """
@@ -652,7 +976,7 @@ def create_execution_plan(**kwargs):
         # 如果执行计划中没有execution_order或为空，使用NetworkX优化
         if not execution_order:
             logger.info("执行计划中没有execution_order，使用NetworkX进行优化")
-            execution_order = optimize_execution_order(scripts, script_dependencies)
+            execution_order = optimize_script_execution_order(scripts, script_dependencies)
             execution_plan["execution_order"] = execution_order
         
         # 保存完整的执行计划到XCom
@@ -740,7 +1064,7 @@ with DAG(
             # 如果执行计划中没有execution_order或为空，使用NetworkX优化
             if not execution_order:
                 logger.info("执行计划中没有execution_order，使用NetworkX进行优化")
-                execution_order = optimize_execution_order(scripts, script_dependencies)
+                execution_order = optimize_script_execution_order(scripts, script_dependencies, nx.DiGraph())
             
             logger.info(f"执行计划: exec_date={exec_date}, scripts数量={len(scripts)}")
             
@@ -769,7 +1093,7 @@ with DAG(
                 script_name = script.get("script_name")
                 target_table = script.get("target_table")
                 script_type = script.get("script_type", "python")
-                script_exec_mode = script.get("script_exec_mode", "append")
+                update_mode = script.get("update_mode", "append")
                 source_tables = script.get("source_tables", [])
                 target_table_label = script.get("target_table_label", "")
                 
@@ -792,9 +1116,9 @@ with DAG(
                     "script_id": script_id,
                     "script_name": script_name,
                     "target_table": target_table,
-                    "script_exec_mode": script_exec_mode,
+                    "update_mode": update_mode,
                     "source_tables": source_tables,
-                    "frequency": script.get("frequency", "daily"),  # 显式添加frequency参数
+                    "schedule_frequency": script.get("schedule_frequency", "daily"),
                     "target_table_label": target_table_label,
                     # logical_date会在任务执行时由Airflow自动添加
                 }
@@ -897,4 +1221,4 @@ with DAG(
     # 设置依赖关系，确保执行阶段完成后触发finalize DAG
     execution_group >> trigger_finalize_dag
 
-logger.info(f"DAG dataops_productline_execute_dag 定义完成") 
+logger.info(f"DAG dataops_productline_execute_dag 定义完成")

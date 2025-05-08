@@ -66,7 +66,7 @@ from config import NEO4J_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG
 import traceback
 import pendulum
 import pytz
-from utils import get_pg_conn, get_cn_exec_date, check_script_exists, get_complete_script_info
+from utils import get_pg_conn, get_cn_exec_date, check_script_exists, get_complete_script_info, get_table_label
 from airflow.exceptions import AirflowException
 
 # 设置logger
@@ -117,35 +117,6 @@ def get_dag_params(**context):
     
     logger.info(f"最终使用的参数 - 脚本名称: {script_name}, 目标表: {target_table}, 依赖级别: {dependency_level}, 执行日期: {exec_date}")
     return script_name, target_table, dependency_level, exec_date, logical_date
-
-def get_table_label(table_name):
-    """确定表的标签类型（DataModel or DataResource）"""
-    driver = GraphDatabase.driver(
-        NEO4J_CONFIG['uri'], 
-        auth=(NEO4J_CONFIG['user'], NEO4J_CONFIG['password'])
-    )
-    query = """
-        MATCH (n {en_name: $table_name})
-        RETURN labels(n) AS labels
-    """
-    try:
-        with driver.session() as session:
-            result = session.run(query, table_name=table_name)
-            record = result.single()
-            if record and record.get("labels"):
-                labels = record.get("labels")
-                if "DataModel" in labels:
-                    return "DataModel"
-                elif "DataResource" in labels:
-                    return "DataResource"
-                elif "DataSource" in labels:
-                    return "DataSource"
-            return None
-    except Exception as e:
-        logger.error(f"获取表 {table_name} 的标签时出错: {str(e)}")
-        return None
-    finally:
-        driver.close()
 
 def find_target_table_for_script(script_name):
     """
