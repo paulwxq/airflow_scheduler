@@ -37,7 +37,7 @@ def load_data_from_source(source_name="default", execution_date=None, execution_
     
     return True
 
-def run(table_name, execution_mode, exec_date=None, script_name=None, **kwargs):
+def run(table_name, update_mode, schedule_frequency, script_name, exec_date, **kwargs):
     """
     统一入口函数，符合Airflow动态脚本调用规范
     
@@ -56,7 +56,7 @@ def run(table_name, execution_mode, exec_date=None, script_name=None, **kwargs):
     # 打印所有传入的参数
     logger.info(f"===== 传入参数信息 =====")
     logger.info(f"table_name: {table_name}")
-    logger.info(f"execution_mode: {execution_mode}")
+    logger.info(f"update_mode: {update_mode}")
     logger.info(f"exec_date: {exec_date}")
     logger.info(f"script_name: {script_name}")
     
@@ -69,7 +69,7 @@ def run(table_name, execution_mode, exec_date=None, script_name=None, **kwargs):
     return load_data_from_source(
         source_name=table_name, 
         execution_date=exec_date, 
-        execution_mode=execution_mode, 
+        update_mode=update_mode, 
         script_name=script_name
     )
 

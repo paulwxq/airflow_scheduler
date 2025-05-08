@@ -165,9 +165,10 @@ def execute_python_script(script_id, script_name, target_table, update_mode, sch
             # 构建完整的参数字典
             run_params = {
                 "table_name": target_table,
-                "execution_mode": update_mode,
+                "update_mode": update_mode,
                 "exec_date": exec_date,
-                "schedule_frequency": schedule_frequency
+                "schedule_frequency": schedule_frequency,
+                "script_name": script_name,
             }
 
             ## 添加可能的额外参数
