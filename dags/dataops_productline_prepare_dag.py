@@ -15,8 +15,7 @@ import hashlib
 import pendulum
 from utils import (
     get_pg_conn, 
-    get_neo4j_driver,
-    get_today_date
+    get_neo4j_driver
 )
 from config import PG_CONFIG, NEO4J_CONFIG, DATAOPS_DAGS_PATH
 
