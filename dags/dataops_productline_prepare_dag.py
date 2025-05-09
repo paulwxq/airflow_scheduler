@@ -1184,7 +1184,8 @@ def prepare_productline_dag_schedule(**kwargs):
         logger.info(f"开始准备执行日期 {exec_date} 的创建执行计划的调度任务")
         
         # 检查是否需要创建新的执行计划
-        need_create_plan = False
+        # 出于测试目的，直接设置为True
+        need_create_plan = True
         
         # 条件1: 数据库中不存在当天的执行计划
         try:

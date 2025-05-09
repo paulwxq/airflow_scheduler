@@ -118,6 +118,9 @@ def execute_python_script(script_id, script_name, target_table, update_mode, sch
     
     返回:
         bool: 脚本执行结果
+        
+    异常:
+        Exception: 当脚本执行失败时抛出异常，确保任务在Airflow中标记为失败状态
     """
     # 获取执行日期
     logical_date = kwargs.get('logical_date', datetime.now())
@@ -190,6 +193,12 @@ def execute_python_script(script_id, script_name, target_table, update_mode, sch
                 result = bool(result)
                 logger.warning(f"脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
             
+            # 检查结果，如果为False则抛出异常
+            if not result:
+                error_msg = f"脚本 {script_name} 执行失败，返回值为False"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+            
             # 记录结束时间和结果
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
@@ -209,8 +218,8 @@ def execute_python_script(script_id, script_name, target_table, update_mode, sch
         import traceback
         logger.error(traceback.format_exc())
         
-        # 确保不会阻塞DAG
-        return False
+        # 重新抛出异常，确保任务在Airflow中标记为失败状态
+        raise
 
 # 使用execute_sql函数代替之前的execute_sql_script
 def execute_sql(script_id, script_name, target_table, update_mode, schedule_frequency, **kwargs):
@@ -227,6 +236,9 @@ def execute_sql(script_id, script_name, target_table, update_mode, schedule_freq
     
     返回:
         bool: 脚本执行结果
+        
+    异常:
+        Exception: 当脚本执行失败时抛出异常，确保任务在Airflow中标记为失败状态
     """
     # 获取执行日期
     logical_date = kwargs.get('logical_date', datetime.now())
@@ -305,6 +317,12 @@ def execute_sql(script_id, script_name, target_table, update_mode, schedule_freq
                 original_result = result
                 result = bool(result)
                 logger.warning(f"SQL脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+            
+            # 检查结果，如果为False则抛出异常
+            if not result:
+                error_msg = f"SQL脚本 {script_name} 执行失败，返回值为False"
+                logger.error(error_msg)
+                raise Exception(error_msg)
 
             # 记录结束时间和结果
             end_time = datetime.now()
@@ -326,8 +344,8 @@ def execute_sql(script_id, script_name, target_table, update_mode, schedule_freq
         import traceback
         logger.error(traceback.format_exc())
         
-        # 确保不会阻塞DAG
-        return False
+        # 重新抛出异常，确保任务在Airflow中标记为失败状态
+        raise
 
 # 使用execute_python函数代替之前的execute_python_script
 def execute_python(script_id, script_name, target_table, update_mode, schedule_frequency, **kwargs):
@@ -344,6 +362,9 @@ def execute_python(script_id, script_name, target_table, update_mode, schedule_f
     
     返回:
         bool: 脚本执行结果
+        
+    异常:
+        Exception: 当脚本执行失败时抛出异常，确保任务在Airflow中标记为失败状态
     """
     # 获取执行日期
     logical_date = kwargs.get('logical_date', datetime.now())
@@ -422,6 +443,12 @@ def execute_python(script_id, script_name, target_table, update_mode, schedule_f
                 original_result = result
                 result = bool(result)
                 logger.warning(f"Python脚本返回非布尔值 {original_result}，转换为布尔值: {result}")
+            
+            # 检查结果，如果为False则抛出异常
+            if not result:
+                error_msg = f"Python脚本 {script_name} 执行失败，返回值为False"
+                logger.error(error_msg)
+                raise Exception(error_msg)
 
             # 记录结束时间和结果
             end_time = datetime.now()
@@ -443,8 +470,8 @@ def execute_python(script_id, script_name, target_table, update_mode, schedule_f
         import traceback
         logger.error(traceback.format_exc())
         
-        # 确保不会阻塞DAG
-        return False
+        # 重新抛出异常，确保任务在Airflow中标记为失败状态
+        raise
 
 #############################################
 # 执行计划获取和处理函数
@@ -979,7 +1006,7 @@ def create_execution_plan(**kwargs):
         # 如果执行计划中没有execution_order或为空，使用NetworkX优化
         if not execution_order:
             logger.info("执行计划中没有execution_order，使用NetworkX进行优化")
-            execution_order = optimize_script_execution_order(scripts, script_dependencies)
+            execution_order = optimize_script_execution_order(scripts, script_dependencies, nx.DiGraph())
             execution_plan["execution_order"] = execution_order
         
         # 保存完整的执行计划到XCom
