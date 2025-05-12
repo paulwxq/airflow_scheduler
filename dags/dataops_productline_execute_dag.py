@@ -56,10 +56,11 @@ from utils import (
     get_today_date,
     get_cn_exec_date
 )
-from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG
+from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG,SCHEDULE_TABLE_SCHEMA
 import pytz
 import pandas as pd
 import sys
+from airflow.utils.trigger_rule import TriggerRule
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -479,33 +480,24 @@ def execute_python(script_id, script_name, target_table, update_mode, schedule_f
 
 def get_execution_plan_from_db(ds):
     """
-    从数据库获取产品线执行计划
+    从数据库获取特定执行日期的执行计划
     
     参数:
-        ds (str): 执行日期，格式为'YYYY-MM-DD'
+        ds (str): 执行日期，格式为YYYY-MM-DD
         
     返回:
-        dict: 执行计划字典，如果找不到则返回None
+        dict: 执行计划字典，如果未找到返回None
     """
-    # 记录输入参数详细信息
-    if isinstance(ds, datetime):
-        if ds.tzinfo:
-            logger.debug(f"【执行日期】get_execution_plan_from_db接收到datetime对象: {ds}, 带时区: {ds.tzinfo}")
-        else:
-            logger.debug(f"【执行日期】get_execution_plan_from_db接收到datetime对象: {ds}, 无时区")
-    else:
-        logger.debug(f"【执行日期】get_execution_plan_from_db接收到: {ds}, 类型: {type(ds)}")
-    
-    logger.info(f"尝试从数据库获取执行日期 {ds} 的产品线执行计划")
-    conn = get_pg_conn()
-    cursor = conn.cursor()
-    execution_plan = None
+    logger.info(f"从数据库获取执行日期 exec_date={ds} 的执行计划")
     
     try:
+        conn = get_pg_conn()
+        cursor = conn.cursor()
+        
         # 查询条件a: 当前日期=表的exec_date，如果有多条记录，取logical_date最大的一条
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT plan
-            FROM airflow_exec_plans
+            FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
             WHERE dag_id = 'dataops_productline_prepare_dag' AND exec_date = %s
             ORDER BY logical_date DESC
             LIMIT 1
@@ -527,9 +519,9 @@ def get_execution_plan_from_db(ds):
         
         # 查询条件b: 找不到当前日期的记录，查找exec_date<当前ds的最新记录
         logger.info(f"未找到当前日期 exec_date={ds} 的执行计划记录，尝试查找历史记录")
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT plan, exec_date
-            FROM airflow_exec_plans
+            FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
             WHERE dag_id = 'dataops_productline_prepare_dag' AND exec_date < %s
             ORDER BY exec_date DESC, logical_date DESC
             LIMIT 1
@@ -646,14 +638,14 @@ def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
             local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
             
             # 插入记录
-            cursor.execute("""
-                INSERT INTO airflow_exec_plans
+            cursor.execute(f"""
+                INSERT INTO {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
                 (dag_id, run_id, logical_date, local_logical_date, exec_date, plan)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (dag_id, run_id, logical_date, local_logical_date, ds, plan_json))
             
             conn.commit()
-            logger.info(f"成功将执行计划保存到airflow_exec_plans表，dag_id={dag_id}, run_id={run_id}, exec_date={ds}")
+            logger.info(f"成功将执行计划保存到{SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans表，dag_id={dag_id}, run_id={run_id}, exec_date={ds}")
             return True
         except Exception as e:
             logger.error(f"保存执行计划到数据库时出错: {str(e)}")

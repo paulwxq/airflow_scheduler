@@ -5,12 +5,16 @@ import sys
 import os
 import pandas as pd
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 import csv
 import glob
 import shutil
 import re
 import argparse
+import psycopg2.extras
+
+from script_utils import get_config_param
+SCHEDULE_TABLE_SCHEMA = get_config_param("SCHEDULE_TABLE_SCHEMA")
 
 # 修改Python导入路径，确保能找到同目录下的script_utils模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -462,10 +466,10 @@ def run(table_name, update_mode='append', exec_date=None, target_type=None,
                         logger.info(f"查询表 {table_name} 的target_dt_column...")
                         target_dt_query = """
                             SELECT target_dt_column 
-                            FROM data_transform_scripts 
+                            FROM {}.data_transform_scripts 
                             WHERE target_table = %s 
                             LIMIT 1
-                        """
+                        """.format(SCHEDULE_TABLE_SCHEMA)
                         cursor.execute(target_dt_query, (table_name,))
                         result = cursor.fetchone()
                         

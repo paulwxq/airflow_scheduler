@@ -7,7 +7,13 @@ from datetime import datetime, timedelta
 import psycopg2
 import textwrap
 from airflow.exceptions import AirflowException
+import importlib
+import time
+import traceback
+import re
 
+from script_utils import get_config_param
+SCHEDULE_TABLE_SCHEMA = get_config_param("SCHEDULE_TABLE_SCHEMA")
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +79,9 @@ def get_python_script(target_table, script_name):
         
         query = """
             SELECT script_content, target_dt_column
-            FROM data_transform_scripts
+            FROM {}.data_transform_scripts
             WHERE target_table = %s AND script_name = %s LIMIT 1
-        """
+        """.format(SCHEDULE_TABLE_SCHEMA)
         
         logger.info(f"执行SQL查询: {query}")
         logger.info(f"查询参数: target_table={target_table}, script_name={script_name}")

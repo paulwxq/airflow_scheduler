@@ -16,6 +16,9 @@ from datetime import datetime, timedelta
 import pytz
 import re  # 添加re模块以支持正则表达式
 
+# 添加导入SCHEDULE_TABLE_SCHEMA
+#from dags.config import SCHEDULE_TABLE_SCHEMA
+
 # 导入Airflow相关包
 try:
     from airflow.models import Variable
@@ -479,10 +482,11 @@ def get_target_dt_column(table_name, script_name=None):
             return None
         
         # 查询data_transform_scripts表
+        schema = get_config_param("SCHEDULE_TABLE_SCHEMA")
         try:
             query = f"""
                 SELECT target_dt_column
-                FROM data_transform_scripts
+                FROM {schema}.data_transform_scripts
                 WHERE target_table = '{table_name}'
             """
             if script_name:
@@ -512,3 +516,21 @@ def get_target_dt_column(table_name, script_name=None):
     finally:
         if 'driver' in locals() and driver:
             driver.close()
+
+def get_config_param(param_name, default_value=None):
+    """
+    从config模块动态获取配置参数
+    
+    参数:
+        param_name (str): 参数名
+        default_value: 默认值
+        
+    返回:
+        参数值，如果不存在则返回默认值
+    """
+    try:
+        config_module = load_config_module()
+        return getattr(config_module, param_name)
+    except Exception as e:
+        logger.warning(f"获取配置参数 {param_name} 失败: {str(e)}，使用默认值: {default_value}")
+        return default_value

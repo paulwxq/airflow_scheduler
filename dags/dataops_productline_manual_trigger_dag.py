@@ -68,6 +68,8 @@ import pendulum
 import pytz
 from utils import get_pg_conn, get_cn_exec_date, check_script_exists, get_complete_script_info, get_table_label
 from airflow.exceptions import AirflowException
+from config import AIRFLOW_BASE_PATH, SCRIPTS_BASE_PATH, SCHEDULE_TABLE_SCHEMA
+import sys
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -82,6 +84,8 @@ default_args = {
     'retries': 1,
     'retry_delay': timedelta(minutes=1),
 }
+
+
 
 def get_dag_params(**context):
     """获取DAG运行参数"""
@@ -542,7 +546,7 @@ def execute_python_script(script_info):
 
 def execute_sql(script_info):
     """
-    执行SQL脚本（从data_transform_scripts表获取）
+    执行SQL脚本（从{SCHEDULE_TABLE_SCHEMA}.data_transform_scripts表获取）
     
     参数:
         script_info: 脚本信息字典
@@ -632,7 +636,7 @@ def execute_sql(script_info):
 
 def execute_python(script_info):
     """
-    执行Python脚本（从data_transform_scripts表获取）
+    执行Python脚本（从{SCHEDULE_TABLE_SCHEMA}.data_transform_scripts表获取）
     
     参数:
         script_info: 脚本信息字典
@@ -650,7 +654,7 @@ def execute_python(script_info):
     exec_date = script_info.get('exec_date', datetime.now().strftime('%Y-%m-%d'))
     
     # 记录开始执行
-    logger.info(f"===== 开始执行Python脚本(data_transform_scripts): {script_name} =====")
+    logger.info(f"===== 开始执行Python脚本({SCHEDULE_TABLE_SCHEMA}.data_transform_scripts): {script_name} =====")
     logger.info(f"目标表: {target_table}")
     logger.info(f"更新模式: {update_mode}")
     logger.info(f"表标签: {target_table_label}")

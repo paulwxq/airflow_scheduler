@@ -18,7 +18,8 @@ from utils import (
     get_neo4j_driver,
     get_cn_exec_date
 )
-from config import PG_CONFIG, NEO4J_CONFIG, DATAOPS_DAGS_PATH
+from config import PG_CONFIG, NEO4J_CONFIG, DATAOPS_DAGS_PATH, EXECUTION_PLAN_KEEP_COUNT, AIRFLOW_BASE_PATH, SCHEDULE_TABLE_SCHEMA
+from airflow.utils.trigger_rule import TriggerRule
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -720,72 +721,79 @@ def touch_product_scheduler_file():
 
 def check_execution_plan_in_db(**kwargs):
     """
-    检查当天的执行计划是否存在于数据库中
-    返回False将阻止所有下游任务执行
+    检查数据库中是否已存在指定DAG运行的执行计划
+    
+    参数:
+        **kwargs: Airflow上下文参数
+        
+    返回:
+        bool: 如果存在执行计划返回True，否则返回False
     """
-    # 获取执行日期
-    dag_run = kwargs.get('dag_run')
-    logger.info(f"This DAG run was triggered via: {dag_run.run_type}")
-    logical_date = dag_run.logical_date    
-    exec_date, local_logical_date = get_cn_exec_date(logical_date)
-    logger.info(f"logical_date： {logical_date} ")
-    logger.info(f"local_logical_date： {local_logical_date} ")
-    logger.info(f"检查执行日期 exec_date： {exec_date} 的执行计划是否存在于数据库中")
-   
-    # 检查数据库中是否存在执行计划
+    # 从上下文中获取dag_id, run_id和执行日期
+    dag_id = kwargs.get('dag_run').dag_id
+    run_id = kwargs.get('dag_run').run_id
+    logical_date = kwargs.get('logical_date')
+    
+    # 转换为本地时间
+    local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
+    
+    # 获取执行日期字符串
+    ds = kwargs.get('ds')  # YYYY-MM-DD格式
+    
+    logger.info(f"检查数据库中是否存在执行计划")
+    logger.info(f"DAG ID: {dag_id}")
+    logger.info(f"运行ID: {run_id}")
+    logger.info(f"逻辑日期: {logical_date}")
+    logger.info(f"本地逻辑日期: {local_logical_date}")
+    logger.info(f"执行日期: {ds}")
+    
     try:
         conn = get_pg_conn()
         cursor = conn.cursor()
+        
         try:
-            cursor.execute("""
-                SELECT plan
-                FROM airflow_exec_plans
-                WHERE exec_date = %s AND dag_id = 'dataops_productline_prepare_dag'
-                ORDER BY logical_date DESC
-                LIMIT 1
-            """, (exec_date,))
+            # 查询是否存在相应的执行计划
+            cursor.execute(f"""
+                SELECT COUNT(*) 
+                FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans 
+                WHERE dag_id = %s AND run_id = %s AND exec_date = %s
+            """, (dag_id, run_id, ds))
             
             result = cursor.fetchone()
-            if not result:
-                logger.error(f"数据库中不存在执行日期 {exec_date} 的执行计划")
-                return False
+            count = result[0] if result else 0
             
-            # 检查执行计划内容是否有效
-            try:
-                # PostgreSQL的jsonb类型会被psycopg2自动转换为Python字典，无需再使用json.loads
-                plan_data = result[0]            
-                # 检查必要字段
-                if "exec_date" not in plan_data:
-                    logger.error("执行计划缺少exec_date字段")
-                    return False
-                    
-                if not isinstance(plan_data.get("scripts", []), list):
-                    logger.error("执行计划的scripts字段无效")
-                    return False
-                    
-                if not isinstance(plan_data.get("resource_scripts", []), list):
-                    logger.error("执行计划的resource_scripts字段无效")
-                    return False
-
-                if not isinstance(plan_data.get("model_scripts", []), list):
-                    logger.error("执行计划的model_scripts字段无效")
-                    return False
-                
-                # 检查是否有脚本数据
-                scripts = plan_data.get("scripts", [])
-                resource_scripts = plan_data.get("resource_scripts", [])
-                model_scripts = plan_data.get("model_scripts", [])
-                
-                logger.info(f"执行计划验证成功: 包含 {len(scripts)} 个脚本，{len(resource_scripts)} 个资源脚本和 {len(model_scripts)} 个模型脚本")
+            logger.info(f"找到 {count} 条执行计划记录")
+            
+            # 如果存在记录，返回True
+            if count > 0:
+                logger.info(f"数据库中已存在此次运行的执行计划")
                 return True
+            else:
+                logger.info(f"数据库中不存在此次运行的执行计划")
                 
-            except Exception as je:
-                logger.error(f"处理执行计划数据时出错: {str(je)}")
+                # 删除历史执行计划，只保留最近N条
+                if EXECUTION_PLAN_KEEP_COUNT > 0:
+                    cursor.execute(f"""
+                        DELETE FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans 
+                        WHERE dag_id = %s AND exec_date = %s
+                        AND id NOT IN (
+                            SELECT id FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
+                            WHERE dag_id = %s AND exec_date = %s
+                            ORDER BY id DESC
+                            LIMIT {EXECUTION_PLAN_KEEP_COUNT - 1}
+                        )
+                    """, (dag_id, ds, dag_id, ds))
+                    
+                    deleted_rows = cursor.rowcount
+                    conn.commit()
+                    logger.info(f"已删除 {deleted_rows} 条旧的执行计划记录")
+                
                 return False
-            
+                
         except Exception as e:
-            logger.error(f"检查数据库中执行计划时出错: {str(e)}")
-            raise Exception(f"PostgreSQL查询执行计划失败: {str(e)}")
+            logger.error(f"查询执行计划时出错: {str(e)}")
+            conn.rollback()
+            raise Exception(f"查询执行计划失败: {str(e)}")
         finally:
             cursor.close()
             conn.close()
@@ -819,8 +827,8 @@ def save_execution_plan_to_db(execution_plan, dag_id, run_id, logical_date, ds):
             local_logical_date = pendulum.instance(logical_date).in_timezone('Asia/Shanghai')
             
             # 插入记录
-            cursor.execute("""
-                INSERT INTO airflow_exec_plans
+            cursor.execute(f"""
+                INSERT INTO {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
                 (dag_id, run_id, logical_date, local_logical_date, exec_date, plan)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (dag_id, run_id, logical_date, local_logical_date, ds, plan_json))

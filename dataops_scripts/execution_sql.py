@@ -9,6 +9,14 @@ import jinja2
 # 修改导入方式，避免使用相对导入
 import sys
 import os
+import traceback
+import time
+from datetime import datetime, timedelta
+import pytz
+import re
+
+from script_utils import get_config_param
+SCHEDULE_TABLE_SCHEMA = get_config_param("SCHEDULE_TABLE_SCHEMA")
 
 # 配置日志记录器
 logging.basicConfig(
@@ -97,10 +105,10 @@ def get_script_content(target_table, script_name):
         
         query = """
             SELECT script_content, target_dt_column 
-            FROM data_transform_scripts 
+            FROM {}.data_transform_scripts 
             WHERE target_table = %s AND script_name = %s 
             LIMIT 1
-        """
+        """.format(SCHEDULE_TABLE_SCHEMA)
         
         logger.info(f"执行SQL查询: {query}")
         logger.info(f"查询参数: target_table={target_table}, script_name={script_name}")

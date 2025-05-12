@@ -49,3 +49,6 @@ EXECUTION_PLAN_KEEP_COUNT = 5
 
 # ETL作业幂等性开关
 ENABLE_ETL_IDEMPOTENCY = True
+
+#dataops中的SCHEDULE相关的表 schema
+SCHEDULE_TABLE_SCHEMA = "dags"
