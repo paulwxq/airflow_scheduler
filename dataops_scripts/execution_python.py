@@ -381,6 +381,12 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None, s
             **kwargs
         }
 
+        # 打印exec_locals的参数列表
+        logger.info("-- 代码片段执行的 exec_locals参数列表 --")
+        for key, value in exec_locals.items():
+            logger.info(f"参数: {key} = {value}")
+
+
         # 安全执行Python片段
         try:
             # 开始执行 Python 片段...

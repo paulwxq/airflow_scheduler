@@ -13,6 +13,7 @@ import glob
 from pathlib import Path
 import hashlib
 import pendulum
+import sys
 from utils import (
     get_pg_conn, 
     get_neo4j_driver,
@@ -774,15 +775,19 @@ def check_execution_plan_in_db(**kwargs):
                 # 删除历史执行计划，只保留最近N条
                 if EXECUTION_PLAN_KEEP_COUNT > 0:
                     cursor.execute(f"""
-                        DELETE FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans 
-                        WHERE dag_id = %s AND exec_date = %s
-                        AND id NOT IN (
-                            SELECT id FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
+                        WITH to_keep AS (
+                            SELECT dag_id, run_id, exec_date, insert_time
+                            FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
                             WHERE dag_id = %s AND exec_date = %s
-                            ORDER BY id DESC
-                            LIMIT {EXECUTION_PLAN_KEEP_COUNT - 1}
+                            ORDER BY insert_time DESC
+                            LIMIT %s
                         )
-                    """, (dag_id, ds, dag_id, ds))
+                        DELETE FROM {SCHEDULE_TABLE_SCHEMA}.airflow_exec_plans
+                        WHERE dag_id = %s AND exec_date = %s
+                        AND (dag_id, run_id, exec_date, insert_time) NOT IN (
+                            SELECT dag_id, run_id, exec_date, insert_time FROM to_keep
+                        )
+                    """, (dag_id, ds, EXECUTION_PLAN_KEEP_COUNT, dag_id, ds))
                     
                     deleted_rows = cursor.rowcount
                     conn.commit()

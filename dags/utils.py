@@ -1,12 +1,13 @@
 # utils.py
 import psycopg2
-from neo4j import GraphDatabase
+import os
+import sys
 from config import PG_CONFIG, NEO4J_CONFIG, SCRIPTS_BASE_PATH
+from neo4j import GraphDatabase
 import logging
 import importlib.util
 from pathlib import Path
 import networkx as nx
-import os
 from airflow.exceptions import AirflowFailException
 from datetime import datetime, timedelta, date
 import functools

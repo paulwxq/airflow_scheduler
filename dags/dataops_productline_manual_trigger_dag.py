@@ -62,14 +62,12 @@ from neo4j import GraphDatabase
 import psycopg2
 import networkx as nx
 import json
-from config import NEO4J_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG
 import traceback
 import pendulum
-import pytz
+import sys
 from utils import get_pg_conn, get_cn_exec_date, check_script_exists, get_complete_script_info, get_table_label
 from airflow.exceptions import AirflowException
-from config import AIRFLOW_BASE_PATH, SCRIPTS_BASE_PATH, SCHEDULE_TABLE_SCHEMA
-import sys
+from config import AIRFLOW_BASE_PATH, NEO4J_CONFIG, SCRIPTS_BASE_PATH, SCHEDULE_TABLE_SCHEMA
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -1071,7 +1069,6 @@ with DAG(
     description='script_name和target_table可以二选一，支持三种依赖级别：self(仅当前表或脚本)、resource(到Resource层)、source(到Source层)',
     schedule_interval=None,  # 设置为None表示只能手动触发
     catchup=False,
-    is_paused_upon_creation=False,
     params={
         "script_name": "",
         "target_table": "",

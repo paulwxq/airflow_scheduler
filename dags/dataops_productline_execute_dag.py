@@ -47,9 +47,10 @@ from airflow.models import Variable
 import logging
 import networkx as nx
 import json
-import os
 import pendulum
 from decimal import Decimal
+import os
+import sys
 from utils import (
     get_pg_conn, 
     get_neo4j_driver,
@@ -59,7 +60,7 @@ from utils import (
 from config import TASK_RETRY_CONFIG, SCRIPTS_BASE_PATH, PG_CONFIG, NEO4J_CONFIG,SCHEDULE_TABLE_SCHEMA
 import pytz
 import pandas as pd
-import sys
+
 from airflow.utils.trigger_rule import TriggerRule
 
 # 创建日志记录器
