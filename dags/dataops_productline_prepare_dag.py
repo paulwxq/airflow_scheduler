@@ -770,9 +770,8 @@ def check_execution_plan_in_db(**kwargs):
                 logger.info(f"数据库中已存在此次运行的执行计划")
                 return True
             else:
-                logger.info(f"数据库中不存在此次运行的执行计划")
-                
-                # 删除历史执行计划，只保留最近N条
+                logger.info(f"数据库中不存在此次运行的执行计划")                
+                # 删除历史执行计划，只保留最近N条。
                 if EXECUTION_PLAN_KEEP_COUNT > 0:
                     cursor.execute(f"""
                         WITH to_keep AS (

@@ -144,14 +144,6 @@ def get_pg_config():
         
         if pg_config is None:
             logger.warning("配置模块中未找到PG_CONFIG")
-            # 返回默认配置
-            return {
-                "host": "localhost",
-                "port": 5432,
-                "user": "postgres",
-                "password": "postgres",
-                "database": "dataops"
-            }
         
         logger.info(f"已获取PostgreSQL配置: {pg_config}")
         return pg_config
@@ -175,15 +167,15 @@ def get_upload_paths():
     """
     try:
         config_module = load_config_module()
-        upload_path = getattr(config_module, "STRUCTURE_UPLOAD_BASE_PATH", "/data/csv")
-        archive_path = getattr(config_module, "STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH", "/data/archive")
+        upload_path = getattr(config_module, "STRUCTURE_UPLOAD_BASE_PATH")
+        archive_path = getattr(config_module, "STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH")
         
-        logger.info(f"已获取上传路径: {upload_path}, 归档路径: {archive_path}")
+        logger.info(f"获取上传路径: {upload_path}, 归档路径: {archive_path}")
         return upload_path, archive_path
     except Exception as e:
         logger.error(f"获取上传路径时出错: {str(e)}")
         # 返回默认路径
-        return "/data/csv", "/data/archive"
+        return "/data/upload", "/data/archive"
 
 def get_date_range(exec_date, frequency):
     """

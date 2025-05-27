@@ -117,7 +117,7 @@ def get_script_content(target_table, script_name):
         result = cursor.fetchone()
         
         if result is None:
-            logger.error(f"未找到目标表 '{target_table}' 和脚本名 '{script_name}' 对应的脚本")
+            logger.error(f"未找到目标表 '{target_table}' 和脚本名 '{script_name}' 对应的脚本.")
             return None, None
         
         # 获取脚本内容和目标日期列    

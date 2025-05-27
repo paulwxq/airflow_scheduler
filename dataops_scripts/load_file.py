@@ -13,18 +13,15 @@ import re
 import argparse
 import psycopg2.extras
 
-from script_utils import get_config_param
-SCHEDULE_TABLE_SCHEMA = get_config_param("SCHEDULE_TABLE_SCHEMA")
-
 # 修改Python导入路径，确保能找到同目录下的script_utils模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
-
 # 先导入整个模块，确保script_utils对象在全局作用域可用
 import script_utils
 # 再导入具体的方法
-from script_utils import get_pg_config, get_upload_paths, logger as utils_logger
+from script_utils import get_pg_config, get_upload_paths, get_config_param, logger as utils_logger
+SCHEDULE_TABLE_SCHEMA = get_config_param("SCHEDULE_TABLE_SCHEMA")
 
 # 配置日志记录器
 logging.basicConfig(
@@ -46,16 +43,7 @@ try:
     logger.info(f"通过script_utils获取配置成功: 上传路径={STRUCTURE_UPLOAD_BASE_PATH}, 归档路径={STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH}")
 except Exception as e:
     logger.error(f"获取配置失败，使用默认值: {str(e)}")
-    # 默认配置
-    PG_CONFIG = {
-        "host": "localhost",
-        "port": 5432,
-        "user": "postgres",
-        "password": "postgres",
-        "database": "dataops",
-    }
-    STRUCTURE_UPLOAD_BASE_PATH = '/tmp/uploads'
-    STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH = '/tmp/uploads/archive'
+    raise
 
 def get_pg_conn():
     """获取PostgreSQL连接"""
@@ -262,6 +250,30 @@ def load_dataframe_to_table(df, file_path, table_name):
         # 将空字符串替换为None
         for col in df_mapped.columns:
             df_mapped[col] = df_mapped[col].map(lambda x: None if isinstance(x, str) and x == '' else x)
+        
+        # 记录处理前的行数
+        original_row_count = len(df_mapped)
+        
+        # 丢弃全部为空值的行
+        df_mapped = df_mapped.dropna(how='all')
+        final_row_count = len(df_mapped)
+        
+        # 计算删除的空行数量
+        empty_rows_count = original_row_count - final_row_count
+        
+        if empty_rows_count > 0:
+            logger.warning(f"发现并删除了 {empty_rows_count} 行全空行")
+            logger.info(f"丢弃全空行后剩余数据行数: {final_row_count}")
+        else:
+            logger.info(f"数据行数: {final_row_count}")
+
+        # 检查目标表是否有create_time字段，如果有则添加当前时间
+        if 'create_time' in table_columns:
+            current_time = datetime.now()
+            df_mapped['create_time'] = current_time
+            logger.info(f"目标表有 create_time 字段，设置值为: {current_time}")
+        else:
+            logger.warning(f"目标表 '{table_name}' 没有 create_time 字段，跳过添加时间戳")
 
         # 连接数据库
         conn = get_pg_conn()

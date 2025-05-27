@@ -168,7 +168,7 @@ def get_sqlalchemy_engine(db_info):
         db_type = db_info.get("db_type", "").lower()
         
         if db_type == "postgresql":
-            url = f"postgresql://{db_info['username']}:{db_info['password']}@{db_info['host']}:{db_info['port']}/{db_info['database']}"
+            url = f"postgresql+psycopg2://{db_info['username']}:{db_info['password']}@{db_info['host']}:{db_info['port']}/{db_info['database']}"
         elif db_type == "mysql":
             url = f"mysql+pymysql://{db_info['username']}:{db_info['password']}@{db_info['host']}:{db_info['port']}/{db_info['database']}"
         elif db_type == "oracle":
@@ -179,7 +179,7 @@ def get_sqlalchemy_engine(db_info):
             logger.error(f"不支持的数据库类型: {db_type}")
             return None
         
-        # 创建数据库引擎
+        # 创建数据库引擎，让SQLAlchemy处理数据库差异
         engine = create_engine(url)
         return engine
     except Exception as e:
@@ -218,13 +218,20 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
         # 目标表不存在，从源表获取表结构
         source_inspector = inspect(source_engine)
         
-        if not source_inspector.has_table(source_table):
+        # 处理表名中可能包含的schema信息
+        source_schema = None
+        if '.' in source_table:
+            source_schema, source_table = source_table.split('.', 1)
+        
+        if not source_inspector.has_table(source_table, schema=source_schema):
             error_msg = f"源表 {source_table} 不存在"
+            if source_schema:
+                error_msg = f"源表 {source_schema}.{source_table} 不存在"
             logger.error(error_msg)
             raise Exception(error_msg)
         
         # 获取源表的列信息
-        source_columns = source_inspector.get_columns(source_table)
+        source_columns = source_inspector.get_columns(source_table, schema=source_schema)
         
         if not source_columns:
             error_msg = f"源表 {source_table} 没有列信息"
@@ -234,17 +241,37 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
         # 创建元数据对象
         metadata = MetaData()
         
-        # 定义目标表结构
+        # 检查源表中是否已存在create_time和update_time字段
+        existing_column_names = [col['name'].lower() for col in source_columns]
+        has_create_time = 'create_time' in existing_column_names
+        has_update_time = 'update_time' in existing_column_names
+        
+        # 构建列定义列表
+        columns = [Column(col['name'], col['type']) for col in source_columns]
+        
+        # 如果不存在create_time字段，则添加
+        if not has_create_time:
+            from sqlalchemy import TIMESTAMP
+            columns.append(Column('create_time', TIMESTAMP, nullable=True))
+            logger.info(f"为表 {target_table} 添加 create_time 字段")
+        
+        # 如果不存在update_time字段，则添加
+        if not has_update_time:
+            from sqlalchemy import TIMESTAMP
+            columns.append(Column('update_time', TIMESTAMP, nullable=True))
+            logger.info(f"为表 {target_table} 添加 update_time 字段")
+        
+        # 定义目标表结构，让SQLAlchemy处理数据类型映射
         table_def = Table(
             target_table,
             metadata,
-            *[Column(col['name'], col['type']) for col in source_columns],
+            *columns,
             schema=schema
         )
         
         # 在目标数据库中创建表
         metadata.create_all(target_engine)
-        logger.info(f"成功在目标数据库中创建表 {target_table}")
+        logger.info(f"成功在目标数据库中创建表 {schema}.{target_table}")
         
         return True
     except Exception as e:
@@ -394,9 +421,18 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
                 logger.warning(f"查询结果为空，没有数据需要加载")
                 return True
             
-            # 添加create_time列（如果不存在）
-            if 'create_time' not in df.columns:
-                df['create_time'] = datetime.now()
+            # 获取当前时间戳
+            current_time = datetime.now()
+            
+            # 设置create_time列为当前时间 - 记录数据加载时间
+            df['create_time'] = current_time
+            logger.info(f"设置 create_time 字段为当前时间: {current_time}")
+            
+            # update_time字段保持为NULL，因为这是数据加载而非数据更新
+            # update_time只有在数据被修改时才应该被设置
+            if 'update_time' not in df.columns:
+                df['update_time'] = None  # 显式设置为NULL
+                logger.info(f"为数据添加 update_time 字段，初始值为: NULL (数据加载时不设置更新时间)")
             
             # 写入数据到目标表
             logger.info(f"开始写入数据到目标表 {table_name}，共 {len(df)} 行")
