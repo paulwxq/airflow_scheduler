@@ -74,13 +74,27 @@ def get_table_columns(table_name):
         """, (table_name.lower(),))
         
         columns = {}
+        empty_comment_columns = []  # 记录注释为空的列
+        
         for row in cursor.fetchall():
             col_name = row[0]
-            col_comment = row[1] if row[1] else col_name  # 如果注释为空，使用列名
+            col_comment = row[1]
+            
+            # 检查注释是否为空
+            if not col_comment:
+                empty_comment_columns.append(col_name)
+                col_comment = col_name  # 如果注释为空，使用列名
+            
             columns[col_name] = col_comment
             
         if not columns:
              logger.warning(f"未能获取到表 '{table_name}' 的列信息，请检查表是否存在、schema是否正确以及权限。")
+        else:
+            # 检查是否有注释为空的列，如果有则发出告警
+            if empty_comment_columns:
+                logger.warning(f"表 '{table_name}' 中以下列的注释为空: {empty_comment_columns}")
+            else:
+                logger.info(f"表 '{table_name}' 的所有列都有注释，数据匹配将更加准确")
 
         return columns
     except Exception as e:
@@ -119,24 +133,45 @@ def match_file_columns(file_headers, table_columns):
     # 预处理文件headers
     processed_file_headers_lower = {str(header).lower(): header for header in file_headers}
 
+    # 添加调试日志
+    logger.info(f"开始匹配过程，文件列数: {len(file_headers)}, 表列数: {len(table_columns)}")
+    logger.info(f"表列及其注释: {table_columns}")
+    logger.info(f"处理后的注释到列名映射: {processed_comment_to_column_lower}")
+
     # 1. 通过注释匹配 (忽略大小写)
+    logger.info("=== 开始通过注释匹配 ===")
     for processed_header, original_header in processed_file_headers_lower.items():
+        logger.info(f"尝试匹配文件列 '{original_header}' (处理后: '{processed_header}')")
         if processed_header in processed_comment_to_column_lower:
             table_col_original_case = processed_comment_to_column_lower[processed_header]
             if table_col_original_case not in matched_table_cols:
                 mapping[original_header] = table_col_original_case
                 matched_table_cols.add(table_col_original_case)
                 logger.info(f"通过注释匹配: 文件列 '{original_header}' -> 表列 '{table_col_original_case}'")
+            else:
+                logger.warning(f"表列 '{table_col_original_case}' 已被匹配，跳过文件列 '{original_header}'")
+        else:
+            logger.info(f"文件列 '{original_header}' 在注释中未找到匹配")
 
     # 2. 通过名称直接匹配 (忽略大小写)，仅匹配尚未映射的列
+    logger.info("=== 开始通过名称直接匹配 ===")
     for processed_header, original_header in processed_file_headers_lower.items():
          if original_header not in mapping: # 仅当此文件列尚未映射时才进行名称匹配
+            logger.info(f"尝试名称匹配文件列 '{original_header}' (处理后: '{processed_header}')")
             if processed_header in processed_table_columns_lower:
                 table_col_original_case = processed_table_columns_lower[processed_header]
                 if table_col_original_case not in matched_table_cols:
                     mapping[original_header] = table_col_original_case
                     matched_table_cols.add(table_col_original_case)
                     logger.info(f"通过名称匹配: 文件列 '{original_header}' -> 表列 '{table_col_original_case}'")
+                else:
+                    logger.warning(f"表列 '{table_col_original_case}' 已被匹配，跳过文件列 '{original_header}'")
+            else:
+                logger.info(f"文件列 '{original_header}' 在表列名中未找到匹配")
+         else:
+            logger.info(f"文件列 '{original_header}' 已通过注释匹配，跳过名称匹配")
+
+    logger.info(f"=== 匹配完成，成功匹配 {len(mapping)} 个列 ===")
 
     unmapped_file = [h for h in file_headers if h not in mapping]
     if unmapped_file:
