@@ -52,6 +52,7 @@ def get_pg_conn():
 def get_table_columns(table_name):
     """
     获取表的列信息，包括列名和注释
+    如果表不存在，则尝试从Neo4j创建表
     
     返回:
         dict: {列名: 列注释} 的字典
@@ -59,18 +60,66 @@ def get_table_columns(table_name):
     conn = get_pg_conn()
     cursor = conn.cursor()
     try:
+        # 首先检查表是否存在
+        # 解析表名，可能包含schema（如ods.table_name）
+        if '.' in table_name:
+            schema_name, actual_table_name = table_name.split('.', 1)
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = %s AND table_name = %s
+                );
+            """, (schema_name.lower(), actual_table_name.lower()))
+        else:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = %s
+                );
+            """, (table_name.lower(),))
+        
+        table_exists = cursor.fetchone()[0]
+        
+        if not table_exists:
+            logger.warning(f"表 '{table_name}' 不存在，尝试从Neo4j创建表")
+            # 调用script_utils中的create_table_from_neo4j函数
+            try:
+                if script_utils.create_table_from_neo4j(table_name):
+                    logger.info(f"成功从Neo4j创建表 '{table_name}'")
+                else:
+                    logger.error(f"从Neo4j创建表 '{table_name}' 失败")
+                    return {}
+            except Exception as create_err:
+                logger.error(f"调用create_table_from_neo4j创建表 '{table_name}' 时出错: {str(create_err)}")
+                return {}
+        
         # 查询表列信息
-        cursor.execute("""
-            SELECT 
-                column_name, 
-                col_description((table_schema || '.' || table_name)::regclass::oid, ordinal_position) as column_comment
-            FROM 
-                information_schema.columns
-            WHERE 
-                table_name = %s
-            ORDER BY 
-                ordinal_position
-        """, (table_name.lower(),))
+        # 根据表名是否包含schema来构建查询
+        if '.' in table_name:
+            schema_name, actual_table_name = table_name.split('.', 1)
+            cursor.execute("""
+                SELECT 
+                    column_name, 
+                    col_description((table_schema || '.' || table_name)::regclass::oid, ordinal_position) as column_comment
+                FROM 
+                    information_schema.columns
+                WHERE 
+                    table_schema = %s AND table_name = %s
+                ORDER BY 
+                    ordinal_position
+            """, (schema_name.lower(), actual_table_name.lower()))
+        else:
+            cursor.execute("""
+                SELECT 
+                    column_name, 
+                    col_description((table_schema || '.' || table_name)::regclass::oid, ordinal_position) as column_comment
+                FROM 
+                    information_schema.columns
+                WHERE 
+                    table_name = %s
+                ORDER BY 
+                    ordinal_position
+            """, (table_name.lower(),))
         
         columns = {}
         empty_comment_columns = []  # 记录注释为空的列
@@ -100,8 +149,10 @@ def get_table_columns(table_name):
         logger.error(f"获取表 '{table_name}' 的列信息时出错: {str(e)}")
         return {}
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def match_file_columns(file_headers, table_columns):
     """
