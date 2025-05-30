@@ -86,7 +86,7 @@ def get_source_database_info(table_name, script_name=None):
                 "username": record.get("username"),
                 "password": record.get("password"),
                 "db_type": record.get("db_type"),
-                "schema": record.get("schema", "public"),
+                "schema": record.get("schema"),
                 "source_table": record.get("source_table"),
                 "labels": record.get("labels", [])
             }
@@ -139,9 +139,12 @@ def get_target_database_info():
             "username": pg_config.get("user"),
             "password": pg_config.get("password"),
             "database": pg_config.get("database"),
-            "db_type": "postgresql",
-            "schema": "public"
+            "db_type": "postgresql"
         }
+        
+        # 如果配置中有schema，则添加到连接信息中
+        if "schema" in pg_config and pg_config["schema"]:
+            database_info["schema"] = pg_config["schema"]
         
         logger.info(f"成功获取目标数据库连接信息: {database_info['host']}:{database_info['port']}/{database_info['database']}")
         return database_info
@@ -187,7 +190,7 @@ def get_sqlalchemy_engine(db_info):
         logger.error(traceback.format_exc())
         return None
 
-def create_table_if_not_exists(source_engine, target_engine, source_table, target_table, schema="public"):
+def create_table_if_not_exists(source_engine, target_engine, source_table, target_table, schema=None):
     """
     如果目标表不存在，则从源表复制表结构创建目标表
     
@@ -196,7 +199,7 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
         target_engine: 目标数据库引擎
         source_table: 源表名
         target_table: 目标表名
-        schema: 模式名称
+        schema: 模式名称，如果为None或空字符串则使用"ods"
         
     返回:
         bool: 操作是否成功
@@ -207,12 +210,26 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
     logger.info(f"检查目标表 {target_table} 是否存在，不存在则创建")
     
     try:
+        # 处理schema参数
+        if schema == "" or schema is None:
+            # 如果传递的schema为空，使用"ods"
+            schema = "ods"
+            logger.info(f"schema参数为空，使用默认schema: {schema}")
+        else:
+            # 如果传递的schema不为空，使用传递的schema
+            if schema != "ods":
+                logger.warning(f"使用非标准schema: {schema}，建议使用'ods'作为目标schema")
+            logger.info(f"使用传递的schema: {schema}")
+        
+        table_display_name = f"{schema}.{target_table}"
+        logger.info(f"目标表完整名称: {table_display_name}")
+        
         # 检查目标表是否存在
         target_inspector = inspect(target_engine)
         target_exists = target_inspector.has_table(target_table, schema=schema)
         
         if target_exists:
-            logger.info(f"目标表 {target_table} 已存在，无需创建")
+            logger.info(f"目标表 {table_display_name} 已存在，无需创建")
             return True
         
         # 目标表不存在，从源表获取表结构
@@ -253,15 +270,16 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
         if not has_create_time:
             from sqlalchemy import TIMESTAMP
             columns.append(Column('create_time', TIMESTAMP, nullable=True))
-            logger.info(f"为表 {target_table} 添加 create_time 字段")
+            logger.info(f"为表 {table_display_name} 添加 create_time 字段")
         
         # 如果不存在update_time字段，则添加
         if not has_update_time:
             from sqlalchemy import TIMESTAMP
             columns.append(Column('update_time', TIMESTAMP, nullable=True))
-            logger.info(f"为表 {target_table} 添加 update_time 字段")
+            logger.info(f"为表 {table_display_name} 添加 update_time 字段")
         
         # 定义目标表结构，让SQLAlchemy处理数据类型映射
+        # 现在schema总是有值（至少是"ods"）
         table_def = Table(
             target_table,
             metadata,
@@ -271,7 +289,7 @@ def create_table_if_not_exists(source_engine, target_engine, source_table, targe
         
         # 在目标数据库中创建表
         metadata.create_all(target_engine)
-        logger.info(f"成功在目标数据库中创建表 {schema}.{target_table}")
+        logger.info(f"成功在目标数据库中创建表 {table_display_name}")
         
         return True
     except Exception as e:
@@ -315,23 +333,43 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
         if not source_engine or not target_engine:
             raise Exception("无法创建数据库引擎，无法加载数据")
 
-        # 获取源表名
+        # 获取源表名和源schema
         source_table = source_db_info.get("source_table", table_name) or table_name
+        source_schema = source_db_info.get("schema")
+        
+        # 构建完整的源表名
+        if source_schema:
+            full_source_table_name = f"{source_schema}.{source_table}"
+        else:
+            full_source_table_name = source_table
+        
+        logger.info(f"源表完整名称: {full_source_table_name}")
 
-        # 确保目标表存在
-        if not create_table_if_not_exists(source_engine, target_engine, source_table, table_name):
-            raise Exception(f"无法创建目标表 {table_name}，无法加载数据")
+        # 获取目标schema
+        target_schema = target_db_info.get("schema")
+        
+        # 构建完整的目标表名
+        if target_schema:
+            full_table_name = f"{target_schema}.{table_name}"
+        else:
+            full_table_name = table_name
+        
+        logger.info(f"目标表完整名称: {full_table_name}")
+        
+        # 确保目标表存在 - create_table_if_not_exists必须使用"ods"作为schema
+        if not create_table_if_not_exists(source_engine, target_engine, full_source_table_name, table_name, "ods"):
+            raise Exception(f"无法创建目标表 {full_table_name}，无法加载数据")
 
         # 根据更新模式处理数据
         if update_mode == "full_refresh":
             # 执行全量刷新，清空表
-            logger.info(f"执行全量刷新，清空表 {table_name}")
+            logger.info(f"执行全量刷新，清空表 {full_table_name}")
             with target_engine.begin() as conn:  # 使用begin()自动管理事务
-                conn.execute(f"TRUNCATE TABLE {table_name}")
-            logger.info(f"成功清空表 {table_name}")
+                conn.execute(text(f"TRUNCATE TABLE {full_table_name}"))
+            logger.info(f"成功清空表 {full_table_name}")
 
             # 构建全量查询
-            query = f"SELECT * FROM {source_table}"
+            query = f"SELECT * FROM {full_source_table_name}"
         else:
             # 增量更新，需要获取目标日期列和日期范围
             target_dt_column = get_target_dt_column(table_name, script_name)
@@ -348,13 +386,13 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
                     
                     # 执行删除操作
                     delete_sql = f"""
-                        DELETE FROM {table_name}
+                        DELETE FROM {full_table_name}
                         WHERE {target_dt_column} >= '{start_date}'
                         AND {target_dt_column} < '{end_date}'
                     """
                     with target_engine.begin() as conn:  # 使用begin()自动管理事务
-                        conn.execute(delete_sql)
-                    logger.info(f"成功删除表 {table_name} 中 {target_dt_column} 从 {start_date} 到 {end_date} 的数据")
+                        conn.execute(text(delete_sql))
+                    logger.info(f"成功删除表 {full_table_name} 中 {target_dt_column} 从 {start_date} 到 {end_date} 的数据")
                 else:
                     # 自动调度
                     start_datetime, end_datetime = get_one_day_range(exec_date)
@@ -364,14 +402,14 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
                     
                     # 执行删除操作
                     delete_sql = f"""
-                        DELETE FROM {table_name}
+                        DELETE FROM {full_table_name}
                         WHERE create_time >= '{start_date}'
                         AND create_time < '{end_date}'
                     """
                     try:
                         with target_engine.begin() as conn:  # 使用begin()自动管理事务
-                            conn.execute(delete_sql)
-                        logger.info(f"成功删除表 {table_name} 中 create_time 从 {start_date} 到 {end_date} 的数据")
+                            conn.execute(text(delete_sql))
+                        logger.info(f"成功删除表 {full_table_name} 中 create_time 从 {start_date} 到 {end_date} 的数据")
                     except Exception as del_err:
                         logger.error(f"删除数据时出错: {str(del_err)}")
                         logger.warning("继续执行数据加载")
@@ -383,19 +421,23 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
                 
                 # 检查源表是否含有目标日期列
                 source_inspector = inspect(source_engine)
-                source_columns = [col['name'].lower() for col in source_inspector.get_columns(source_table)]
+                # 处理源表的schema信息用于检查列
+                if source_schema:
+                    source_columns = [col['name'].lower() for col in source_inspector.get_columns(source_table, schema=source_schema)]
+                else:
+                    source_columns = [col['name'].lower() for col in source_inspector.get_columns(source_table)]
                 
                 if target_dt_column.lower() in source_columns:
                     # 源表含有目标日期列，构建包含日期条件的查询
                     query = f"""
-                        SELECT * FROM {source_table}
+                        SELECT * FROM {full_source_table_name}
                         WHERE {target_dt_column} >= '{start_date}'
                         AND {target_dt_column} < '{end_date}'
                     """
                 else:
                     # 源表不含目标日期列，构建全量查询
-                    logger.warning(f"源表 {source_table} 没有目标日期列 {target_dt_column}，将加载全部数据")
-                    query = f"SELECT * FROM {source_table}"
+                    logger.warning(f"源表 {full_source_table_name} 没有目标日期列 {target_dt_column}，将加载全部数据")
+                    query = f"SELECT * FROM {full_source_table_name}"
                 
             except Exception as date_err:
                 logger.error(f"计算日期范围时出错: {str(date_err)}")
@@ -435,17 +477,26 @@ def load_data_from_source(table_name, exec_date=None, update_mode=None, script_n
                 logger.info(f"为数据添加 update_time 字段，初始值为: NULL (数据加载时不设置更新时间)")
             
             # 写入数据到目标表
-            logger.info(f"开始写入数据到目标表 {table_name}，共 {len(df)} 行")
+            logger.info(f"开始写入数据到目标表 {full_table_name}，共 {len(df)} 行")
             with target_engine.connect() as connection:
-                df.to_sql(
-                    name=table_name,
-                    con=connection,
-                    if_exists='append',
-                    index=False,
-                    schema=target_db_info.get("schema", "public")
-                )
+                # 处理schema参数，如果为空则不传递schema参数
+                if target_schema:
+                    df.to_sql(
+                        name=table_name,
+                        con=connection,
+                        if_exists='append',
+                        index=False,
+                        schema=target_schema
+                    )
+                else:
+                    df.to_sql(
+                        name=table_name,
+                        con=connection,
+                        if_exists='append',
+                        index=False
+                    )
             
-            logger.info(f"成功写入数据到目标表 {table_name}")
+            logger.info(f"成功写入数据到目标表 {full_table_name}")
             return True
             
         except Exception as query_err:

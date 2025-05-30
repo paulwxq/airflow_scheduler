@@ -38,7 +38,7 @@ DATAOPS_DAGS_PATH = os.path.join(AIRFLOW_BASE_PATH, 'dags')
 SCRIPTS_BASE_PATH = os.path.join(AIRFLOW_BASE_PATH, 'dataops_scripts')
 
 # 上传的CSV/EXCEL文件的基准上传路径
-STRUCTURE_UPLOAD_BASE_PATH ="/data/csv"
+STRUCTURE_UPLOAD_BASE_PATH ="/data/upload"
 STRUCTURE_UPLOAD_ARCHIVE_BASE_PATH ="/data/archive"
 
 # 本地开发环境脚本路径（如果需要区分环境）

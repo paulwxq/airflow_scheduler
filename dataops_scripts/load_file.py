@@ -67,8 +67,7 @@ def get_table_columns(table_name):
             FROM 
                 information_schema.columns
             WHERE 
-                table_schema = 'public' -- 明确指定 schema，如果需要
-                AND table_name = %s
+                table_name = %s
             ORDER BY 
                 ordinal_position
         """, (table_name.lower(),))
@@ -302,13 +301,20 @@ def load_dataframe_to_table(df, file_path, table_name):
         else:
             logger.info(f"数据行数: {final_row_count}")
 
-        # 检查目标表是否有create_time字段，如果有则添加当前时间
+        # 检查目标表是否有时间戳字段，优先使用create_time，其次使用created_at
+        current_time = datetime.now()
+        timestamp_field_added = False
+
         if 'create_time' in table_columns:
-            current_time = datetime.now()
             df_mapped['create_time'] = current_time
             logger.info(f"目标表有 create_time 字段，设置值为: {current_time}")
+            timestamp_field_added = True
+        elif 'created_at' in table_columns:
+            df_mapped['created_at'] = current_time
+            logger.info(f"目标表有 created_at 字段，设置值为: {current_time}")
+            timestamp_field_added = True
         else:
-            logger.warning(f"目标表 '{table_name}' 没有 create_time 字段，跳过添加时间戳")
+            logger.warning(f"目标表 '{table_name}' 既没有 create_time 字段也没有 created_at 字段，跳过添加时间戳")
 
         # 连接数据库
         conn = get_pg_conn()
@@ -317,7 +323,7 @@ def load_dataframe_to_table(df, file_path, table_name):
         # 构建INSERT语句
         columns = ', '.join([f'"{col}"' for col in df_mapped.columns])
         placeholders = ', '.join(['%s'] * len(df_mapped.columns))
-        insert_sql = f'INSERT INTO public."{table_name}" ({columns}) VALUES ({placeholders})'
+        insert_sql = f'INSERT INTO "{table_name}" ({columns}) VALUES ({placeholders})'
         
         # 批量插入数据
         rows = [tuple(row) for row in df_mapped.values]
@@ -588,12 +594,12 @@ def run(table_name, update_mode='append', exec_date=None, target_type=None,
                 conn = get_pg_conn()
                 cursor = conn.cursor()
                 # 假设表在 public schema，并为表名加引号
-                logger.info(f"执行全量刷新，清空表 public.\"{table_name}\"")
-                cursor.execute(f'TRUNCATE TABLE public.\"{table_name}\"')
+                logger.info(f"执行全量刷新，清空表 \"{table_name}\"")
+                cursor.execute(f'TRUNCATE TABLE \"{table_name}\"')
                 conn.commit()
-                logger.info("表 public.\"" + table_name + "\" 已清空。")
+                logger.info("表 \"" + table_name + "\" 已清空。")
             except Exception as e:
-                logger.error("清空表 public.\"" + table_name + "\" 时出错: " + str(e))
+                logger.error("清空表 \"" + table_name + "\" 时出错: " + str(e))
                 if conn:
                     conn.rollback()
                 return False # 清空失败则直接失败退出
@@ -614,12 +620,12 @@ def run(table_name, update_mode='append', exec_date=None, target_type=None,
                 conn = get_pg_conn()
                 cursor = conn.cursor()
                 # 假设表在 public schema，并为表名加引号
-                logger.info(f"执行全量刷新，清空表 public.\"{table_name}\"")
-                cursor.execute(f'TRUNCATE TABLE public.\"{table_name}\"')
+                logger.info(f"执行全量刷新，清空表 \"{table_name}\"")
+                cursor.execute(f'TRUNCATE TABLE \"{table_name}\"')
                 conn.commit()
-                logger.info("表 public.\"" + table_name + "\" 已清空。")
+                logger.info("表 \"" + table_name + "\" 已清空。")
             except Exception as e:
-                logger.error("清空表 public.\"" + table_name + "\" 时出错: " + str(e))
+                logger.error("清空表 \"" + table_name + "\" 时出错: " + str(e))
                 if conn:
                     conn.rollback()
                 return False # 清空失败则直接失败退出
