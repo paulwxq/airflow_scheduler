@@ -236,27 +236,30 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None, s
         
         logger.info(f"成功获取脚本内容，长度: {len(script_code)} 字符")
         
-        # 日期计算
-        # try:
-        #     # 直接使用script_utils.get_date_range计算日期范围
-        #     logger.info(f"使用script_utils.get_date_range计算日期范围，参数: exec_date={exec_date}, frequency={schedule_frequency}")
-        #     start_date, end_date = script_utils.get_date_range(exec_date, schedule_frequency)
-        #     logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
-        # except Exception as date_err:
-        #     logger.error(f"日期处理失败: {str(date_err)}", exc_info=True)
-        #     # 使用简单的默认日期范围计算
-        #     date_obj = datetime.strptime(exec_date, '%Y-%m-%d')
-        #     if schedule_frequency.lower() == 'daily':
-        #         start_date = date_obj.strftime('%Y-%m-%d')
-        #         end_date = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
-        #     else:
-        #         # 对其他频率使用默认范围
-        #         start_date = exec_date
-        #         end_date = (date_obj + timedelta(days=30)).strftime('%Y-%m-%d')
-        #     logger.warning(f"使用默认日期范围计算: start_date={start_date}, end_date={end_date}")
+        # 获取目标表标签，用于决定schema
+        target_table_label = kwargs.get('target_table_label', '')
+        
+        # 根据 target_table_label 决定 schema
+        if target_table_label and 'DataResource' in target_table_label:
+            target_schema = 'ods'
+        else:
+            target_schema = 'ads'
+        
+        logger.info(f"目标表标签: {target_table_label}, 决定使用schema: {target_schema}")
+        
+        # 检查目标表是否存在，如果不存在则尝试创建
+        logger.info(f"检查目标表 '{target_table}' 是否存在，如果不存在则尝试从Neo4j创建")
+        if not script_utils.check_and_create_table(target_table, default_schema=target_schema):
+            logger.error(f"目标表 '{target_table}' 不存在且无法创建，无法继续执行Python脚本")
+            return False
+        
+        logger.info(f"目标表 '{target_table}' 检查完成，可以继续执行")
+        
+        # 初始化日期变量，确保在所有情况下都有值
+        start_date = None
+        end_date = None
         
         # 检查是否开启ETL幂等性
-        target_table_label = kwargs.get('target_table_label', '')
         script_exec_mode = kwargs.get('update_mode', 'append')  # 只使用update_mode
         is_manual_dag_trigger = kwargs.get('is_manual_dag_trigger', False) 
         
@@ -361,6 +364,25 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None, s
                 logger.info(f"当前更新模式 {script_exec_mode} 不是append或full_refresh，不执行幂等性处理")
         else:
             logger.info("未开启ETL幂等性，直接执行Python脚本")
+        
+        # 如果日期变量还没有被设置，则计算默认的日期范围
+        if start_date is None or end_date is None:
+            logger.info(f"计算默认日期范围，参数: exec_date={exec_date}, frequency={schedule_frequency}")
+            try:
+                start_date, end_date = script_utils.get_date_range(exec_date, schedule_frequency)
+                logger.info(f"计算得到的日期范围: start_date={start_date}, end_date={end_date}")
+            except Exception as date_err:
+                logger.error(f"日期处理失败: {str(date_err)}", exc_info=True)
+                # 使用简单的默认日期范围计算
+                date_obj = datetime.strptime(exec_date, '%Y-%m-%d')
+                if schedule_frequency.lower() == 'daily':
+                    start_date = date_obj.strftime('%Y-%m-%d')
+                    end_date = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+                else:
+                    # 对其他频率使用默认范围
+                    start_date = exec_date
+                    end_date = (date_obj + timedelta(days=30)).strftime('%Y-%m-%d')
+                logger.warning(f"使用默认日期范围计算: start_date={start_date}, end_date={end_date}")
 
         # 准备执行上下文
         conn = get_pg_conn()  # 在外层先拿到连接

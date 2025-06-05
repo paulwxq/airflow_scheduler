@@ -527,12 +527,83 @@ def get_config_param(param_name, default_value=None):
         logger.warning(f"获取配置参数 {param_name} 失败: {str(e)}，使用默认值: {default_value}")
         return default_value
 
-def create_table_from_neo4j(en_name: str):
+def check_and_create_table(table_name, default_schema=None):
+    """
+    检查目标表是否存在，如果不存在则尝试从Neo4j创建表
+    
+    参数:
+        table_name (str): 表名，支持schema.table格式
+        default_schema (str, optional): 当表名不包含schema时的默认schema，默认为None
+    
+    返回:
+        bool: 表存在或创建成功返回True，否则返回False
+    """
+    logger.info(f"开始检查目标表 '{table_name}' 是否存在")
+    
+    # 解析表名，支持schema.table格式
+    if '.' in table_name:
+        schema_name, table_name_only = table_name.split('.', 1)
+    else:
+        schema_name = default_schema if default_schema else 'ods'  # 使用传入的默认schema或'ods'
+        table_name_only = table_name
+    
+    logger.info(f"解析表名: schema='{schema_name}', table='{table_name_only}'")
+    
+    conn = None
+    cursor = None
+    try:
+        # 获取数据库配置和连接
+        pg_config = get_pg_config()
+        import psycopg2
+        conn = psycopg2.connect(**pg_config)
+        cursor = conn.cursor()
+        
+        # 检查表是否存在 - 使用EXISTS查询方式
+        check_table_sql = """
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = %s AND table_name = %s
+            );
+        """
+        
+        cursor.execute(check_table_sql, (schema_name.lower(), table_name_only.lower()))
+        table_exists = cursor.fetchone()[0]
+        
+        logger.info(f"表存在性检查结果: {table_exists}")
+        
+        if not table_exists:
+            logger.warning(f"表 '{table_name}' 不存在，尝试从Neo4j创建表")
+            # 调用create_table_from_neo4j函数，传递schema参数
+            try:
+                if create_table_from_neo4j(table_name_only, default_schema=schema_name):
+                    logger.info(f"成功从Neo4j创建表 '{table_name}'")
+                    return True
+                else:
+                    logger.error(f"从Neo4j创建表 '{table_name}' 失败")
+                    return False
+            except Exception as create_err:
+                logger.error(f"调用create_table_from_neo4j创建表 '{table_name}' 时出错: {str(create_err)}")
+                return False
+        else:
+            logger.info(f"表 '{table_name}' 已存在")
+            return True
+            
+    except Exception as e:
+        logger.error(f"检查表存在性时出错: {str(e)}", exc_info=True)
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+def create_table_from_neo4j(en_name: str, default_schema: str = None):
     """
     根据Neo4j中的表定义创建PostgreSQL表
     
     参数:
         en_name (str): 表的英文名称
+        default_schema (str, optional): 默认schema，如果提供则优先使用，否则从Neo4j查询Label决定
     
     返回:
         bool: 成功返回True，失败返回False
@@ -568,7 +639,13 @@ def create_table_from_neo4j(en_name: str):
             table_cn_name = record["name"]
             node_id = record["node_id"]
 
-            schema = "ods" if "DataResource" in labels else "ads"
+            # 优先使用传入的 default_schema，如果没有则从 Neo4j Label 判断
+            if default_schema:
+                schema = default_schema
+                logger.info(f"使用传入的 default_schema: {schema}")
+            else:
+                schema = "ods" if "DataResource" in labels else "ads"
+                logger.info(f"从 Neo4j Label {labels} 判断 schema: {schema}")
 
             # 2. 查找所有字段（HAS_COLUMN关系）并按Column节点的系统id排序
             column_result = session.run("""
@@ -586,7 +663,7 @@ def create_table_from_neo4j(en_name: str):
 
             # 3. 构造 DDL
             ddl_lines = []
-            pk_fields = []
+            pk_fields = set()  # 使用 set 自动去重
             existing_fields = set()
 
             for col in columns:
@@ -594,7 +671,7 @@ def create_table_from_neo4j(en_name: str):
                 ddl_lines.append(col_line)
                 existing_fields.add(col["en_name"].lower())
                 if col.get("is_pk", False):
-                    pk_fields.append(f'{col["en_name"]}')
+                    pk_fields.add(col["en_name"])  # 使用 add 方法，自动去重
 
             # 检查并添加 create_time 和 update_time 字段
             if 'create_time' not in existing_fields:
@@ -603,7 +680,9 @@ def create_table_from_neo4j(en_name: str):
                 ddl_lines.append('update_time timestamp')
 
             if pk_fields:
-                ddl_lines.append(f'PRIMARY KEY ({", ".join(pk_fields)})')
+                # 将 set 转换为排序后的列表，确保 DDL 生成的一致性
+                sorted_pk_fields = sorted(list(pk_fields))
+                ddl_lines.append(f'PRIMARY KEY ({", ".join(sorted_pk_fields)})')
 
             full_table_name = f"{schema}.{table_en_name}"
             ddl = f'CREATE SCHEMA IF NOT EXISTS {schema};\n'

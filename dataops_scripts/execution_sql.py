@@ -301,8 +301,26 @@ def run(script_type=None, target_table=None, script_name=None, exec_date=None,
         
         logger.info(f"成功获取脚本内容，长度: {len(sql_content)} 字符")
         
-        # 检查是否开启ETL幂等性
+        # 获取目标表标签，用于决定schema
         target_table_label = kwargs.get('target_table_label', '')
+        
+        # 根据 target_table_label 决定 schema
+        if target_table_label and 'DataResource' in target_table_label:
+            target_schema = 'ods'
+        else:
+            target_schema = 'ads'
+        
+        logger.info(f"目标表标签: {target_table_label}, 决定使用schema: {target_schema}")
+        
+        # 检查目标表是否存在，如果不存在则尝试创建
+        logger.info(f"检查目标表 '{target_table}' 是否存在，如果不存在则尝试从Neo4j创建")
+        if not script_utils.check_and_create_table(target_table, default_schema=target_schema):
+            logger.error(f"目标表 '{target_table}' 不存在且无法创建，无法继续执行SQL脚本")
+            return False
+        
+        logger.info(f"目标表 '{target_table}' 检查完成，可以继续执行")
+        
+        # 检查是否开启ETL幂等性
         script_exec_mode = kwargs.get('update_mode', 'append')  # 只使用update_mode
         is_manual_dag_trigger = kwargs.get('is_manual_dag_trigger', False)  # 新增：获取是否为手动触发的DAG
         
